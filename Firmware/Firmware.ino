@@ -27,21 +27,23 @@
 #include <Wire.h>
 #include "imu.h"
 
-byte fingerSwitchPins[] = {12, 11, 10, 9};
+byte fingerSwitchPins[] = {9, 10, 11, 12};
+
+unsigned long lastTimestamp;
 
 IMU imu = IMU();
 
 void setup() {
-  // put your setup code here, to run once:
-//  Wire.begin(I2C_MASTER, 0x00, I2C_PINS_18_19, I2C_PULLUP_INT, I2C_RATE_400);
-  
+  //  Wire.begin(I2C_MASTER, 0x00, I2C_PINS_18_19, I2C_PULLUP_INT, I2C_RATE_400);
+  Serial.begin(115200);
+
   // Some butt-head didn't leave room for i2c pullups on the lil board.
   // Using adjacent pins as makeshift 3V3 sources :|
   pinMode(17, OUTPUT);
   digitalWrite(17, HIGH);
   pinMode(20, OUTPUT);
   digitalWrite(20, HIGH);
-  
+
   Wire.begin();
   Wire.setClock(400000);
   imu.setup();
@@ -49,17 +51,34 @@ void setup() {
   for (int i = 0; i < 4; i++) {
     pinMode(fingerSwitchPins[i], INPUT_PULLUP);
   }
+
+  lastTimestamp = micros();
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  unsigned long timestamp = micros();
+
   imu.poll();
-  debug_println(imu.Yaw);
+
+  // Packet format:
+  // >[./|],[./|],[./|],[./|],[float x],[float y],[float z],[float w],[us since last sample]
+  
+  Serial.print('>');
 
   for (int i = 0; i < 4; i++) {
-    debug_print(digitalRead(fingerSwitchPins[i]) ? '|' : '.');
+    Serial.print(digitalRead(fingerSwitchPins[i]) ? '.' : '|');
+    Serial.print(',');
   }
-  debug_println('_');
-  
-  delay(10);
+
+  for (int i = 0; i < 4; i++) {
+    Serial.print(imu.Quat[i]);
+    Serial.print(',');
+  }
+
+  // Not sure if this is where the delta should be calculated
+  Serial.println(timestamp - lastTimestamp);
+
+  delay(100);
+
+  lastTimestamp = timestamp;
 }
