@@ -8,7 +8,13 @@
 class IMU {
   private:
     // HPR output
-    const byte algorithmControlDefaults = 0b00000100; // Baseline setting for AlgorithmControl register, since bit 1 controls Standby
+    const byte hprOutput = 0b00000100;
+    const byte quaternionOutput = 0b00000000;
+    const byte rawDataOutput = 0b00000010;
+    const byte calibratedDataOutput = 0b00000000;
+    const byte standbyEnabled = 0b00000001;
+    const byte standbyDisabled = 0b00000000;
+    const byte algorithmControlDefaults = quaternionOutput + calibratedDataOutput + standbyEnabled;
 
     struct accelerometerCalibrationData
     {
