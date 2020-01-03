@@ -14,7 +14,7 @@ import json
 import os
 from PIL import Image, ImageTk
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 root = Tk()
 root.attributes('-topmost', 1)
@@ -38,6 +38,7 @@ for i in range(16):
 
     hand_bitmaps.append(hand_bitmap)
     hand_icons[i] = ImageTk.PhotoImage(image=hand_bitmap)
+
 
 class Gesture:
     def __init__(self, glyph, raw_data, normalized_quats=None):
@@ -198,6 +199,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.port = None
         self.serial_sniffing_thread = None
         self.receiving = False
+        self.last_hand_id = -1
 
         self.open_file_pathspec = ''
         self.open_file_has_been_modified = False
@@ -268,8 +270,16 @@ class SomaticTrainerHomeWindow(Frame):
                 self.update_status(command['fingers'],
                                    command['quat'][0], command['quat'][1], command['quat'][2], command['quat'][3],
                                    command['freq'])
-                logging.info('Updating status')
+
+                fingers = command['fingers']
+                hand_id = fingers[0] * 0b1000 + fingers[1] * 0b0100 + fingers[2] * 0b0010 + fingers[3] * 0b0001
+                if hand_id != self.last_hand_id:
+                    self.hand_display.create_image((0, 0), image=hand_icons[hand_id], anchor=N + W)
+                    self.last_hand_id = hand_id
+
+                logging.debug('Updating status')
             elif command['type'] is 'quit':
+                del self.queue[:]
                 return
         except Empty:
             pass
@@ -341,17 +351,6 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.open_file_has_been_modified = False
 
-    # def reload_serial_port_picker(self):
-    #     self.serial_port_picker.delete(0, END)
-    #     ports = comports()
-    #     if ports:
-    #         for path, _, __ in ports:
-    #             self.serial_port_picker.insert(END, path)
-    #             self.serial_port_picker.select_set(0)
-    #             self.serial_connect_button.configure(state=NORMAL)
-    #     else:
-    #         self.serial_port_picker.insert('No serial ports!')
-
     def populate_serial_port_menu(self):
         self.port_menu.delete(0, 999)
 
@@ -366,14 +365,12 @@ class SomaticTrainerHomeWindow(Frame):
                 else:
                     self.port_menu.add_checkbutton(label=path, command=lambda pathspec=path: self.connect_to(pathspec))
 
-        self.port_menu.add_command(label='No serial ports available', state=DISABLED)
+        else:
+            self.port_menu.add_command(label='No serial ports available', state=DISABLED)
 
     # def handle_connection_button(self):
     def connect_to(self, portspec):
         self.disconnect()
-
-        # elif self.serial_port_picker.curselection():
-            # portspec = self.serial_port_picker.get(self.serial_port_picker.curselection()[0])
 
         try:
             self.port = Serial(port=portspec, baudrate=115200, timeout=0.2)
@@ -406,6 +403,8 @@ class SomaticTrainerHomeWindow(Frame):
                 self.port = None
                 # self.serial_connect_button.configure(text='Connect')
 
+        self.last_hand_id = -1
+        self.hand_display.create_image((0, 0), image=unknown_hand_icon, anchor=N + W)
         self.status_line.configure(text='Not connected', bg='light goldenrod')
 
     def start_receiving(self):
@@ -422,7 +421,13 @@ class SomaticTrainerHomeWindow(Frame):
 
     def handle_packets(self):
         while self.receiving and self.port and self.port.isOpen():
-            incoming = self.port.readline().decode()
+            try:
+                incoming = self.port.readline().decode()
+            except SerialException:
+                logging.exception('Lost serial connection, bailing out')
+                self.disconnect()
+                continue
+
             if incoming:
                 logging.debug('Received packet {}'.format(incoming))
 
@@ -439,7 +444,7 @@ class SomaticTrainerHomeWindow(Frame):
                 tokens = incoming.split(',')
                 logging.debug(tokens)
 
-                fingers = list(map(lambda i: i is '.', tokens[:4]))
+                fingers = list(map(lambda x: x is '.', tokens[:4]))
                 logging.debug(fingers)
 
                 x, y, z, w = map(float, tokens[4:-1])
@@ -451,7 +456,8 @@ class SomaticTrainerHomeWindow(Frame):
                 else:
                     frequency = 1 / (delta / 1000000)
 
-                self.queue.put({'type': 'rx', 'fingers': fingers, 'quat': [x, y, z, w], 'freq': frequency})
+                if self.queue.empty():
+                    self.queue.put({'type': 'rx', 'fingers': fingers, 'quat': [x, y, z, w], 'freq': frequency})
                 # root.after_idle(self.update_status, fingers, x, y, z, w, frequency)
 
                 logging.debug('Sample parsed')

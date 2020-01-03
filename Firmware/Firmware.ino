@@ -27,7 +27,11 @@
 #include <Wire.h>
 #include "imu.h"
 
+unsigned long fingerDebounce = 100;
+
 byte fingerSwitchPins[] = {9, 10, 11, 12};
+bool lastFingerPositions[4];
+unsigned long lastFingerStableTimestamps[4];
 
 unsigned long lastTimestamp;
 
@@ -66,7 +70,16 @@ void loop() {
   Serial.print('>');
 
   for (int i = 0; i < 4; i++) {
-    Serial.print(digitalRead(fingerSwitchPins[i]) ? '.' : '|');
+    bool fingerPosition = digitalRead(fingerSwitchPins[i]);
+    if (fingerPosition == lastFingerPositions[i]) {
+      lastFingerStableTimestamps[i] = millis();
+    }
+    else if (millis() - lastFingerStableTimestamps[i] >= fingerDebounce) {
+      lastFingerPositions[i] = fingerPosition;
+      lastFingerStableTimestamps[i] = millis();
+    }
+    
+    Serial.print(lastFingerPositions[i] ? '.' : '|');
     Serial.print(',');
   }
 
@@ -78,7 +91,7 @@ void loop() {
   // Not sure if this is where the delta should be calculated
   Serial.println(timestamp - lastTimestamp);
 
-  delay(100);
+  delay(10);
 
   lastTimestamp = timestamp;
 }
