@@ -1,7 +1,7 @@
 from typing import List
 
 from tkinter import *
-from tkinter import messagebox, filedialog, ttk, PhotoImage
+from tkinter import messagebox, filedialog, ttk
 import serial
 from serial import Serial, SerialException
 from serial.tools.list_ports import comports
@@ -12,7 +12,7 @@ from threading import Thread
 from queue import Queue, Empty
 import json
 import os
-from PIL import Image
+from PIL import Image, ImageTk
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -23,8 +23,21 @@ standard_gesture_time = 1000  # Milliseconds
 sampling_rate = 10  # Milliseconds
 
 hand_icon_directory = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'Hands')
-hand_icons = {i: PhotoImage(file=os.path.join(hand_icon_directory,'{:04b}.png'.format(i))) for i in range(16)}
-unknown_hand_icon = PhotoImage(file=os.path.join(hand_icon_directory, 'Unknown.png'))
+# hand_icons = {i: PhotoImage(file=os.path.join(hand_icon_directory,'{:04b}.png'.format(i))) for i in range(16)}
+
+unknown_hand_icon_bitmap = Image.open(os.path.join(hand_icon_directory, 'Unknown.png'))
+unknown_hand_icon_bitmap.thumbnail((250, 250))
+unknown_hand_icon = ImageTk.PhotoImage(image=unknown_hand_icon_bitmap)
+
+hand_bitmaps = []
+hand_icons = {}
+
+for i in range(16):
+    hand_bitmap = Image.open(os.path.join(hand_icon_directory,'{:04b}.png'.format(i)))
+    hand_bitmap.thumbnail((250, 250))
+
+    hand_bitmaps.append(hand_bitmap)
+    hand_icons[i] = ImageTk.PhotoImage(image=hand_bitmap)
 
 class Gesture:
     def __init__(self, glyph, raw_data, normalized_quats=None):
@@ -207,40 +220,38 @@ class SomaticTrainerHomeWindow(Frame):
 
         master.config(menu=self.menu_bar)
 
-        Label(self, text='Hand').grid(row=0, column=0)
-        self.hand_display = Canvas(self, width=250, height=250)
-        self.hand_display.create_image((0, 0), image=unknown_hand_icon, anchor=NW)
-        self.hand_display.grid(row=1, column=0, rowspan=5)
+        left_column = Frame(self, width=250, bg='red')
+        right_column = Frame(self, bg='blue')
 
-        Label(self, text='Path').grid(row=6, column=0)
-        self.path_display = Canvas(self, width=250, height=250)
-        self.path_display.grid(row=6, column=0, rowspan=4)
+        Label(left_column, text='Hand').pack(fill=X)
+        self.hand_display = Canvas(left_column, width=250, height=250)
+        self.hand_display.create_image((0, 0), image=unknown_hand_icon, anchor=N+W)
+        self.hand_display.pack(fill=X)
 
-        # Label(self, text='Serial port').grid(row=0, column=1, columnspan=2)
-        # self.serial_port_picker = Listbox(self, width=50, height=10, selectmode=BROWSE)
-        # self.serial_port_picker.grid(row=1, column=1, columnspan=2)
-        # Button(self, text='Reload', command=self.reload_serial_port_picker, width=15).grid(row=2, column=1)
-        #
-        # self.serial_connect_button = Button(self, text='Connect', width=15,
-        #                                     state=DISABLED, command=self.handle_connection_button)
-        # self.serial_connect_button.grid(row=2, column=2)
+        Label(left_column, text='Path').pack(fill=X)
+        self.path_display = Canvas(left_column, width=250, height=250)
+        self.path_display.pack(fill=X)
 
-        self.file_name_label = Label(self, text='No training file open', bg='white', relief=SUNKEN)
-        self.file_name_label.grid(row=0, column=1, columnspan=2, sticky=E + W)
+        self.file_name_label = Label(right_column, text='No training file open', bg='white', relief=SUNKEN)
+        self.file_name_label.pack(fill=X, anchor=N+E)
 
-        self.glyph_picker = ttk.Treeview(self, column='count')
+        self.glyph_picker = ttk.Treeview(right_column, column='count')
         self.glyph_picker.column("#0", width=100, stretch=False)
         self.glyph_picker.column('count', stretch=True)
         self.glyph_picker.heading('count', text='Count')
-        self.glyph_picker.grid(row=1, column=1, columnspan=2, sticky=N+S+E+W)
+        self.glyph_picker.pack(fill=BOTH, expand=1, anchor=S+E)
         for glyph in GestureTrainingSet.big_ole_list_o_glyphs:
             self.glyph_picker.insert('', 'end', text="Glyph '{}'".format(glyph), value='0')
 
-        self.status_line = Label(self, text='Not connected', anchor=W)
-        self.status_line.grid(row=2, column=0, columnspan=2, sticky=E + W + S)
+        self.status_line = Label(self, text='Not connected', bd=1, relief=SUNKEN, anchor=W, bg='light goldenrod')
+
+        left_column.grid(row=0, column=0, sticky=N)
+        right_column.grid(row=0, column=1, sticky=N+S+E+W)
+        self.status_line.grid(row=1, column=0, columnspan=2, sticky=S+E+W)
 
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
     def start(self):
         # self.reload_serial_port_picker()
@@ -350,7 +361,7 @@ class SomaticTrainerHomeWindow(Frame):
         if ports:
             for path, _, __ in ports:
                 if self.port and path == self.port.port:
-                    self.port_menu.add_checkbutton(label=path, command=lambda pathspec=path: self.connect_to(pathspec),
+                    self.port_menu.add_checkbutton(label=path, command=self.disconnect,
                                                    variable=checked, onvalue=1, offvalue=0)
                 else:
                     self.port_menu.add_checkbutton(label=path, command=lambda pathspec=path: self.connect_to(pathspec))
@@ -359,17 +370,7 @@ class SomaticTrainerHomeWindow(Frame):
 
     # def handle_connection_button(self):
     def connect_to(self, portspec):
-        if self.port:
-            if self.receiving:
-                self.receiving = False
-                if self.serial_sniffing_thread and self.serial_sniffing_thread.is_alive():
-                    self.serial_sniffing_thread.join(timeout=1)
-
-            if self.port.isOpen():
-                self.port.close()
-                self.port = None
-                # self.serial_connect_button.configure(text='Connect')
-                self.status_line.configure(text='Not connected')
+        self.disconnect()
 
         # elif self.serial_port_picker.curselection():
             # portspec = self.serial_port_picker.get(self.serial_port_picker.curselection()[0])
@@ -380,12 +381,32 @@ class SomaticTrainerHomeWindow(Frame):
             if not self.port.isOpen():
                 self.port.open()
             # self.serial_connect_button.configure(text='Disconnect')
-            self.status_line.configure(text='Waiting for data...')
+            self.status_line.configure(text='Waiting for data...', bg='DarkGoldenrod2')
             self.start_receiving()
         except SerialException:
             logging.exception('dafuq')
             messagebox.showinfo("Can't open port", 'Port already opened by another process')
+            self.status_line.configure(text="Can't connect to {0}", bg='firebrick1')
             self.port = None
+
+    def disconnect(self):
+        if self.port:
+            logging.info('Now disconnecting')
+
+            if self.receiving:
+                self.receiving = False
+                if self.serial_sniffing_thread and self.serial_sniffing_thread.is_alive():
+                    logging.info('Quitting receive')
+                    self.serial_sniffing_thread.join(timeout=1)
+                    logging.info('No longer receiving')
+
+            if self.port.isOpen():
+                logging.info('Port closed')
+                self.port.close()
+                self.port = None
+                # self.serial_connect_button.configure(text='Connect')
+
+        self.status_line.configure(text='Not connected', bg='light goldenrod')
 
     def start_receiving(self):
         if self.receiving:
@@ -447,7 +468,8 @@ class SomaticTrainerHomeWindow(Frame):
         self.status_line.configure(text='Received {}{}{}{}_, ({},{},{},{}) at {}Hz'.
                                    format(finger(fingers[0]), finger(fingers[1]),
                                           finger(fingers[2]), finger(fingers[3]),
-                                          w, x, y, z, round(frequency)))
+                                          w, x, y, z, round(frequency)),
+                                   bg='OliveDrab1')
 
     def test_event(self):
         print("Sup dawg")
