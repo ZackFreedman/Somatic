@@ -1,5 +1,3 @@
-from typing import List
-
 from tkinter import *
 from tkinter import messagebox, filedialog, ttk
 import serial
@@ -13,14 +11,13 @@ from queue import Queue, Empty
 import json
 import os
 from PIL import Image, ImageTk
+from enum import Enum
+from somatictrainer.gestures import Gesture, GestureTrainingSet
 
 logging.basicConfig(level=logging.INFO)
 
 root = Tk()
 root.attributes('-topmost', 1)
-
-standard_gesture_time = 1000  # Milliseconds
-sampling_rate = 10  # Milliseconds
 
 hand_icon_directory = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'Hands')
 # hand_icons = {i: PhotoImage(file=os.path.join(hand_icon_directory,'{:04b}.png'.format(i))) for i in range(16)}
@@ -33,157 +30,11 @@ hand_bitmaps = []
 hand_icons = {}
 
 for i in range(16):
-    hand_bitmap = Image.open(os.path.join(hand_icon_directory,'{:04b}.png'.format(i)))
+    hand_bitmap = Image.open(os.path.join(hand_icon_directory, '{:04b}.png'.format(i)))
     hand_bitmap.thumbnail((250, 250))
 
     hand_bitmaps.append(hand_bitmap)
     hand_icons[i] = ImageTk.PhotoImage(image=hand_bitmap)
-
-
-class Gesture:
-    def __init__(self, glyph, raw_data, normalized_quats=None):
-        """
-
-        :param normalized_quats:
-        :type normalized_quats: list of Quaternion or None
-        :param raw_data:
-        :type raw_data tuple of list of Quaternion, float or None
-        :param glyph:
-        :type glyph: str
-        """
-        if normalized_quats is not None and not len(normalized_quats) is 100:
-            raise AttributeError('Normalized data invalid - got {} normalized_data instead of {}'
-                                 .format(len(normalized_quats), standard_gesture_time / sampling_rate))
-
-        if raw_data is None:
-            raise AttributeError('Must provide one source of data')
-
-        if normalized_quats is None:
-            normalized_quats = Gesture.normalize_samples(raw_data[0], raw_data[1])
-
-        self.raw_quats = raw_data[0]
-        self.raw_timedeltas = raw_data[1]
-        self.normalized_data = normalized_quats
-        self.glyph = glyph
-
-    def to_dict(self):
-        datastore = {
-            'g': self.glyph,
-            'r': [(s.w, s.x, s.y, s.z, ts) for s, ts in zip(self.raw_quats, self.raw_timedeltas)],
-            'n': [(s.w, s.x, s.y, s.z) for s in self.normalized_data]
-        }
-        return datastore
-
-    @staticmethod
-    def from_dict(datastore):
-        try:
-            glyph = datastore['g']
-
-            raw_data = [(Quaternion(w=e[0], x=e[1], y=e[2], z=e[3]), e[4]) for e in datastore['r']]
-            normalized_quats = [Quaternion(w=e[0], x=e[1], y=e[2], z=e[3]) for e in datastore['n']]
-            assert len(normalized_quats) is round(standard_gesture_time / sampling_rate)
-
-            return Gesture(glyph, raw_data, normalized_quats)
-
-        except (AssertionError, AttributeError, KeyError):
-            logging.exception('Error parsing dict {}...'.format(str(datastore)[:20]))
-
-        return None
-
-    @staticmethod
-    def normalize_samples(samples: List[Quaternion], timedeltas):
-        if not samples or not timedeltas:
-            raise AttributeError('Samples and/or timedeltas not provided')
-
-        if len(samples) != len(timedeltas):
-            raise AttributeError('Samples and timedeltas must be the same length')
-
-        if not len(samples) or not len(timedeltas):
-            raise AttributeError('Samples and/or timedeltas list are empty')
-
-        scaling_factor = standard_gesture_time / sum(timedeltas)
-        # Standardize times to 1 second
-        scaled_times = [delta * scaling_factor for delta in timedeltas]
-
-        output = []
-
-        # Interpolate to increase/reduce number of samples to required sampling rate
-        for earliest_time in range(0, standard_gesture_time, sampling_rate):
-            # For each sample required, find the latest sample before this time, and the earliest sample
-            # after this time, and slerp them.
-
-            early_sample = None
-            early_time = None
-            late_sample = None
-            late_time = None
-
-            latest_time = earliest_time + sampling_rate
-
-            sample_time = 0
-            for index, sample in enumerate(samples):
-                if index:
-                    sample_time += scaled_times[index]
-
-                if early_sample is None and sample_time >= earliest_time:
-                    # This sample is the latest sample that began earlier than the early time.
-                    early_sample = samples[index]
-                    early_time = sample_time - scaled_times[index]
-
-                if late_sample is None and sample_time >= latest_time:
-                    # This sample is the latest sample that began earlier than the late time.
-                    late_sample = samples[index]
-                    late_time = sample_time
-
-                if early_sample and late_sample:
-                    continue
-
-            if not early_sample or not late_sample:
-                raise AttributeError('Something went wrong - no samples work')
-
-            amount = (earliest_time - early_time) / (late_time - early_time)  # Just the Arduino map function
-            output.append(Quaternion.slerp(early_sample, late_sample, amount))
-
-        return output
-
-
-class GestureTrainingSet:
-    big_ole_list_o_glyphs = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.,?!@#/ 1234567890'
-    current_version = 1  # For deleting old saves
-
-    def __init__(self):
-        self.target_examples_per_glyph = 100
-
-        self.examples = []
-
-    @staticmethod
-    def load(pathspec):
-        with open(pathspec, 'r') as f:
-            datastore = json.load(f)
-
-            if 'version' not in datastore or datastore['version'] != GestureTrainingSet.current_version:
-                logging.warning("Saved file is outdated, not loading")
-                return
-
-            output = GestureTrainingSet()
-
-            for sample_record in datastore['examples']:
-                output.add(Gesture.from_dict(sample_record))
-
-            return output
-
-    def save(self, pathspec):
-        datastore = {'version': GestureTrainingSet.current_version, 'examples': [x.to_dict() for x in self.examples]}
-        with open(pathspec, 'w') as f:
-            json.dump(datastore, f)
-
-    def add(self, example):
-        self.examples.append(example)
-
-    def count(self, glyph):
-        return len([example for example in self.examples if example.glyph == glyph])
-
-    def summarize(self):
-        return {glyph: self.count(glyph) for glyph in self.big_ole_list_o_glyphs}
 
 
 class SomaticTrainerHomeWindow(Frame):
@@ -191,9 +42,21 @@ class SomaticTrainerHomeWindow(Frame):
     serial_sniffing_thread: Thread
     training_set: GestureTrainingSet
 
+    pointer_gesture = [False, False, False, True]
+
+    class State(Enum):
+        quitting = -1
+        disconnected = 0
+        connecting = 1
+        connected = 2
+        recording = 3
+        processing = 4
+
     def __init__(self, master=None):
         Frame.__init__(self, master)
         self.master = master
+
+        self.state = self.State.disconnected
 
         self.queue = Queue()
         self.port = None
@@ -203,7 +66,10 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.open_file_pathspec = ''
         self.open_file_has_been_modified = False
-        self.training_set = None
+        self.training_set = GestureTrainingSet()
+
+        self.gesture_buffer = []
+        self.gesture_anchor = None
 
         self.master.title('Somatic Trainer')
         self.pack(fill=BOTH, expand=1)
@@ -244,6 +110,9 @@ class SomaticTrainerHomeWindow(Frame):
         self.glyph_picker.pack(fill=BOTH, expand=1, anchor=S+E)
         for glyph in GestureTrainingSet.big_ole_list_o_glyphs:
             self.glyph_picker.insert('', 'end', text="Glyph '{}'".format(glyph), value='0')
+        first_item = self.glyph_picker.get_children()[0]
+        self.glyph_picker.focus(first_item)
+        self.glyph_picker.selection_set(first_item)
 
         self.status_line = Label(self, text='Not connected', bd=1, relief=SUNKEN, anchor=W, bg='light goldenrod')
 
@@ -260,26 +129,42 @@ class SomaticTrainerHomeWindow(Frame):
         root.after(10, self.queue_handler)
 
     def stop(self):
+        if self.open_file_has_been_modified:
+            response = messagebox.askyesnocancel('Unsaved changes',
+                                                 'You have unsaved changes. Are you sure you want to quit?')
+            if response:
+                self.save_file()
+            if response is None:
+                return
+
+        self.state = self.State.quitting
         self.receiving = False
         self.queue.put({'type': 'quit'})
 
     def queue_handler(self):
         try:
             command = self.queue.get(block=False)
+            if command['type'] is 'ack':
+                if self.state is self.State.connecting:
+                    self.state = self.State.connected
+                    logging.info('Got ack - connected')
+
             if command['type'] is 'rx':
-                self.update_status(command['fingers'],
-                                   command['quat'][0], command['quat'][1], command['quat'][2], command['quat'][3],
-                                   command['freq'])
+                if self.state is not self.State.disconnected and self.state is not self.State.quitting:
+                    self.update_status(command['fingers'],
+                                       command['quat'][0], command['quat'][1], command['quat'][2], command['quat'][3],
+                                       command['freq'])
 
-                fingers = command['fingers']
-                hand_id = fingers[0] * 0b1000 + fingers[1] * 0b0100 + fingers[2] * 0b0010 + fingers[3] * 0b0001
-                if hand_id != self.last_hand_id:
-                    self.hand_display.create_image((0, 0), image=hand_icons[hand_id], anchor=N + W)
-                    self.last_hand_id = hand_id
+                    fingers = command['fingers']
+                    hand_id = fingers[0] * 0b1000 + fingers[1] * 0b0100 + fingers[2] * 0b0010 + fingers[3] * 0b0001
+                    if hand_id != self.last_hand_id:
+                        self.hand_display.create_image((0, 0), image=hand_icons[hand_id], anchor=N + W)
+                        self.last_hand_id = hand_id
 
-                logging.debug('Updating status')
+                    logging.debug('Updating status')
+
             elif command['type'] is 'quit':
-                del self.queue[:]
+                self.master.destroy()
                 return
         except Empty:
             pass
@@ -287,6 +172,10 @@ class SomaticTrainerHomeWindow(Frame):
         root.after(10, self.queue_handler)
 
     def new_file(self):
+        if self.state is self.State.recording:
+            self.state = self.State.connected
+            self.cancel_gesture()
+
         if self.open_file_has_been_modified:
             outcome = messagebox.askyesnocancel('Unsaved changes',
                                                 'Training data has been changed.\nSave before creating new file?')
@@ -319,6 +208,10 @@ class SomaticTrainerHomeWindow(Frame):
                                      "This file can't be loaded.\nError: {}".format(repr(e)))
 
     def save_file(self):
+        if self.state is self.State.recording:
+            self.state = self.State.connected
+            self.cancel_gesture()
+
         if not self.training_set:
             logging.warning('Tried to save empty training set?')
             return
@@ -336,6 +229,10 @@ class SomaticTrainerHomeWindow(Frame):
         self.open_file_has_been_modified = False
 
     def save_as(self):
+        if self.state is self.State.recording:
+            self.state = self.State.connected
+            self.cancel_gesture()
+
         if not self.training_set:
             logging.warning('Tried to save empty training set?')
             return
@@ -356,6 +253,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         ports = comports()
         checked = IntVar().set(1)
+        not_checked = IntVar().set(0)
 
         if ports:
             for path, _, __ in ports:
@@ -363,7 +261,8 @@ class SomaticTrainerHomeWindow(Frame):
                     self.port_menu.add_checkbutton(label=path, command=self.disconnect,
                                                    variable=checked, onvalue=1, offvalue=0)
                 else:
-                    self.port_menu.add_checkbutton(label=path, command=lambda pathspec=path: self.connect_to(pathspec))
+                    self.port_menu.add_checkbutton(label=path, command=lambda pathspec=path: self.connect_to(pathspec),
+                                                   variable=not_checked, onvalue=1, offvalue=0)
 
         else:
             self.port_menu.add_command(label='No serial ports available', state=DISABLED)
@@ -378,11 +277,14 @@ class SomaticTrainerHomeWindow(Frame):
             if not self.port.isOpen():
                 self.port.open()
             # self.serial_connect_button.configure(text='Disconnect')
-            self.status_line.configure(text='Waiting for data...', bg='DarkGoldenrod2')
+            self.state = self.State.connecting
+            self.status_line.configure(text='Waiting for response...', bg='DarkGoldenrod2')
+            self.port.write(bytes('>AT\r\n'.encode('utf-8')))
             self.start_receiving()
         except SerialException:
             logging.exception('dafuq')
             messagebox.showinfo("Can't open port", 'Port already opened by another process')
+            self.state = self.State.disconnected
             self.status_line.configure(text="Can't connect to {0}", bg='firebrick1')
             self.port = None
 
@@ -404,7 +306,9 @@ class SomaticTrainerHomeWindow(Frame):
                 # self.serial_connect_button.configure(text='Connect')
 
         self.last_hand_id = -1
+        self.cancel_gesture()
         self.hand_display.create_image((0, 0), image=unknown_hand_icon, anchor=N + W)
+        self.state = self.State.disconnected
         self.status_line.configure(text='Not connected', bg='light goldenrod')
 
     def start_receiving(self):
@@ -434,12 +338,20 @@ class SomaticTrainerHomeWindow(Frame):
                 # Packet format:
                 # >[./|],[./|],[./|],[./|],[float x],[float y],[float z],[float w],[us since last sample]
 
-                if incoming.count('>') is not 1 or incoming.count(',') is not 8:
+                if incoming.count('>') is not 1:
                     logging.debug('Packet corrupt - missing delimeter(s)')
                     continue
 
                 # Strip crap that arrived before the delimeter, and also the delimiter itself
                 incoming = incoming[incoming.index('>') + 1:].rstrip()
+
+                if incoming == 'OK':
+                    self.queue.put({'type': 'ack'})
+                    continue
+
+                if incoming.count(',') is not 8:
+                    logging.debug('Packet corrupt - insufficient fields')
+                    continue
 
                 tokens = incoming.split(',')
                 logging.debug(tokens)
@@ -449,12 +361,12 @@ class SomaticTrainerHomeWindow(Frame):
 
                 x, y, z, w = map(float, tokens[4:-1])
                 orientation = Quaternion(w, x, y, z)
-                delta = float(tokens[-1])
+                microseconds = float(tokens[-1])
 
-                if delta == 0:
+                if microseconds == 0:
                     frequency = 0
                 else:
-                    frequency = 1 / (delta / 1000000)
+                    frequency = 1 / (microseconds / 1000000)
 
                 if self.queue.empty():
                     self.queue.put({'type': 'rx', 'fingers': fingers, 'quat': [x, y, z, w], 'freq': frequency})
@@ -462,10 +374,31 @@ class SomaticTrainerHomeWindow(Frame):
 
                 logging.debug('Sample parsed')
 
-                self.handle_sample(fingers, orientation, delta)
+                self.handle_sample(fingers, orientation, microseconds)
 
-    def handle_sample(self, fingers, orientation, delta):
-        pass
+    def handle_sample(self, fingers, orientation, microseconds):
+        if fingers == self.pointer_gesture:
+            if self.state is not self.State.recording:
+                logging.info('Starting sample!')
+                self.status_line.configure(bg='SeaGreen1')
+                self.state = self.State.recording
+                self.gesture_anchor = orientation.unit.conjugate
+                self.gesture_buffer.append((orientation.unit * self.gesture_anchor, 0))
+                logging.info('Start quat: {0} -- Anchor quat: {1}'.format(orientation, self.gesture_anchor))
+            else:
+                relative_orientation = orientation.unit * self.gesture_anchor
+                self.gesture_buffer.append((relative_orientation, microseconds))
+                logging.info(str(relative_orientation))
+
+        else:
+            if self.state is self.State.recording:
+                logging.info('Sample done, {} points'.format(len(self.gesture_buffer)))
+                self.status_line.configure(bg='OliveDrab1')
+
+                self.training_set.add(Gesture(self.glyph_picker.selection()[0], list(self.gesture_buffer)))
+
+                self.cancel_gesture()
+                self.state = self.State.connected
 
     def update_status(self, fingers, x, y, z, w, frequency):
         def finger(value):
@@ -475,16 +408,21 @@ class SomaticTrainerHomeWindow(Frame):
                                    format(finger(fingers[0]), finger(fingers[1]),
                                           finger(fingers[2]), finger(fingers[3]),
                                           w, x, y, z, round(frequency)),
-                                   bg='OliveDrab1')
+                                   bg='SeaGreen1' if self.state is self.State.recording else 'OliveDrab1')
+
+    def cancel_gesture(self):
+        del self.gesture_buffer[:]
+        self.gesture_anchor = None
 
     def test_event(self):
         print("Sup dawg")
         exit()
 
-
 def _main():
     app = SomaticTrainerHomeWindow(root)
     app.start()
+
+    root.protocol('WM_DELETE_WINDOW', app.stop)
     root.mainloop()
 
 
