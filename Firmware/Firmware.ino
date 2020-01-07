@@ -62,6 +62,18 @@ void setup() {
 void loop() {
   unsigned long timestamp = micros();
 
+  if (Serial.available() >= 5) {
+    for (int i = 0; i < Serial.available(); i++) {
+      if (Serial.read() == '>' 
+      && Serial.read() == 'A' 
+      && Serial.read() == 'T' 
+      && Serial.read() == '\r' 
+      && Serial.read() == '\n') {
+        Serial.println(">OK");
+      }
+    }
+  }
+
   imu.poll();
 
   // Packet format:
@@ -91,7 +103,7 @@ void loop() {
   // Not sure if this is where the delta should be calculated
   Serial.println(timestamp - lastTimestamp);
 
-  delay(10);
+  delay(20);
 
   lastTimestamp = timestamp;
 }

@@ -14,7 +14,8 @@ class IMU {
     const byte calibratedDataOutput = 0b00000000;
     const byte standbyEnabled = 0b00000001;
     const byte standbyDisabled = 0b00000000;
-    const byte algorithmControlDefaults = quaternionOutput + calibratedDataOutput + standbyEnabled;
+    const byte algorithmControlDefaults = quaternionOutput + rawDataOutput + standbyDisabled;
+//    const byte algorithmControlDefaults = 0b00000100;
 
     struct accelerometerCalibrationData
     {
