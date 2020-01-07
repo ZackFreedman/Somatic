@@ -11,7 +11,6 @@ sampling_rate = 10  # Milliseconds
 
 logging.basicConfig(level=logging.DEBUG)
 
-
 class Gesture:
     def __init__(self, glyph, raw_data, normalized_quats=None):
         """
