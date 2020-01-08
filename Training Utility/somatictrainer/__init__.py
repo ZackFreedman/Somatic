@@ -1,12 +1,21 @@
 from tkinter import *
+import tkinter
 import logging
+import traceback
 import somatictrainer.app
 
 logging.basicConfig(level=logging.INFO)
 
+
+def log_error(*args):
+    logging.exception(traceback.format_exception(*args))
+
+
+tkinter.Tk.report_callback_exception = log_error
+
+
 def _main():
     root = Tk()
-    # root.withdraw()
     root.attributes('-topmost', 1)
 
     window = somatictrainer.app.SomaticTrainerHomeWindow(root)

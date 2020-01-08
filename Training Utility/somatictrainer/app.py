@@ -4,7 +4,8 @@ import serial
 from serial import Serial, SerialException
 from serial.tools.list_ports import comports
 import logging
-from pyquaternion import Quaternion
+import numpy as np
+import quaternion
 from threading import Thread
 from queue import Queue, Empty
 import json
@@ -13,7 +14,7 @@ from PIL import Image, ImageTk
 from enum import Enum
 from somatictrainer.gestures import Gesture, GestureTrainingSet
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 class SomaticTrainerHomeWindow(Frame):
@@ -21,7 +22,8 @@ class SomaticTrainerHomeWindow(Frame):
     serial_sniffing_thread: Thread
     training_set: GestureTrainingSet
 
-    pointer_gesture = [False, False, False, True]
+    # pointer_gesture = [False, False, False, True]
+    pointer_gesture = [True, True, True, False]
 
     class State(Enum):
         quitting = -1
@@ -140,6 +142,7 @@ class SomaticTrainerHomeWindow(Frame):
     def queue_handler(self):
         try:
             command = self.queue.get(block=False)
+
             if command['type'] is 'ack':
                 if self.state is self.State.connecting:
                     self.state = self.State.connected
@@ -147,8 +150,9 @@ class SomaticTrainerHomeWindow(Frame):
 
             if command['type'] is 'rx':
                 if self.state is not self.State.disconnected and self.state is not self.State.quitting:
+                    components = command['quat'].components
                     self.update_status(command['fingers'],
-                                       command['quat'][0], command['quat'][1], command['quat'][2], command['quat'][3],
+                                       components[0], components[1], components[2], components[3],
                                        command['freq'])
 
                     fingers = command['fingers']
@@ -157,11 +161,34 @@ class SomaticTrainerHomeWindow(Frame):
                         self.hand_display.create_image((0, 0), image=self.hand_icons[hand_id], anchor=N + W)
                         self.last_hand_id = hand_id
 
-                    logging.debug('Updating status')
+                if self.state is self.State.recording and self.gesture_anchor:
+                    relative_orientation: np.quaternion = command['quat'].normalized() * self.gesture_anchor
+                    theta, phi = quaternion.as_spherical_coords(relative_orientation)
 
-            elif command['type'] is 'quit':
+                    logging.debug('Theta: {0} Phi: {1}'.format(theta, phi))
+                    #
+                    # x_coord = _scale(theta, -np.pi, np.pi, 0, 250)
+                    # y_coord = _scale(phi, -np.pi, np.pi, 0, 250)
+
+                    # yaw, roll, pitch = quaternion.as_euler_angles(relative_orientation)
+                    # x_coord = _scale(yaw, -np.pi, np.pi, 0, 250)
+                    # y_coord = _scale(pitch, -np.pi, np.pi, 0, 250)
+                    # x_coord = _scale(np.cos(yaw), -1, 1, 0, 250)
+                    # y_coord = _scale(np.sin(pitch), -1, 1, 0, 250)
+
+                    # logging.debug('yaw {0} pitch {1} roll {2}'.format(yaw * 180 / np.pi,
+                    #                                                  pitch * 180 / np.pi,
+                    #                                                  roll * 180 / np.pi))
+
+                    x_coord = np.cos(theta) * 125
+                    y_coord = np.sin(phi) * 125 + 125
+
+                    self.path_display.create_oval((x_coord, y_coord, x_coord+3, y_coord+3), fill='blue')
+
+            if command['type'] is 'quit':
                 self.master.destroy()
                 return
+
         except Empty:
             pass
 
@@ -342,6 +369,7 @@ class SomaticTrainerHomeWindow(Frame):
                 incoming = incoming[incoming.index('>') + 1:].rstrip()
 
                 if incoming == 'OK':
+                    logging.info('Received ack')
                     self.queue.put({'type': 'ack'})
                     continue
 
@@ -356,7 +384,7 @@ class SomaticTrainerHomeWindow(Frame):
                 logging.debug(fingers)
 
                 x, y, z, w = map(float, tokens[4:-1])
-                orientation = Quaternion(w, x, y, z)
+                orientation = np.quaternion(w, x, y, z)
                 microseconds = float(tokens[-1])
 
                 if microseconds == 0:
@@ -365,7 +393,7 @@ class SomaticTrainerHomeWindow(Frame):
                     frequency = 1 / (microseconds / 1000000)
 
                 if self.queue.empty():
-                    self.queue.put({'type': 'rx', 'fingers': fingers, 'quat': [x, y, z, w], 'freq': frequency})
+                    self.queue.put({'type': 'rx', 'fingers': fingers, 'quat': orientation, 'freq': frequency})
                 # root.after_idle(self.update_status, fingers, x, y, z, w, frequency)
 
                 logging.debug('Sample parsed')
@@ -377,21 +405,22 @@ class SomaticTrainerHomeWindow(Frame):
             if self.state is not self.State.recording:
                 logging.info('Starting sample!')
                 self.status_line.configure(bg='SeaGreen1')
-                self.state = self.State.recording
-                self.gesture_anchor = orientation.unit.conjugate
-                self.gesture_buffer.append((orientation.unit * self.gesture_anchor, 0))
+                self.gesture_anchor = orientation.normalized().conjugate()
+                self.gesture_buffer.append((orientation.normalized() * self.gesture_anchor, 0))
                 logging.info('Start quat: {0} -- Anchor quat: {1}'.format(orientation, self.gesture_anchor))
+                self.state = self.State.recording
             else:
-                relative_orientation = orientation.unit * self.gesture_anchor
+                relative_orientation = orientation.normalized() * self.gesture_anchor
                 self.gesture_buffer.append((relative_orientation, microseconds))
-                logging.info(str(relative_orientation))
+                logging.debug(str(relative_orientation))
 
         else:
             if self.state is self.State.recording:
                 logging.info('Sample done, {} points'.format(len(self.gesture_buffer)))
                 self.status_line.configure(bg='OliveDrab1')
 
-                self.training_set.add(Gesture(self.glyph_picker.selection()[0], list(self.gesture_buffer)))
+                if len(self.gesture_buffer) > 1:
+                    self.training_set.add(Gesture(self.glyph_picker.selection()[0], list(self.gesture_buffer)))
 
                 self.cancel_gesture()
                 self.state = self.State.connected
@@ -409,7 +438,12 @@ class SomaticTrainerHomeWindow(Frame):
     def cancel_gesture(self):
         del self.gesture_buffer[:]
         self.gesture_anchor = None
+        self.path_display.delete(ALL)
 
     def test_event(self):
         print("Sup dawg")
         exit()
+
+
+def _scale(x, in_min, in_max, out_min, out_max):
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
