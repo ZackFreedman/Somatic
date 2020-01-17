@@ -27,9 +27,10 @@
 #include <Wire.h>
 #include "imu.h"
 
-unsigned long fingerDebounce = 100;
+unsigned long fingerDebounce = 50;
 
-byte fingerSwitchPins[] = {9, 10, 11, 12};
+const byte vibePin = 23;
+const byte fingerSwitchPins[] = {9, 10, 11, 12};
 bool lastFingerPositions[4];
 unsigned long lastFingerStableTimestamps[4];
 
@@ -47,6 +48,8 @@ void setup() {
   digitalWrite(17, HIGH);
   pinMode(20, OUTPUT);
   digitalWrite(20, HIGH);
+
+  pinMode(vibePin, OUTPUT);
 
   Wire.begin();
   Wire.setClock(400000);
@@ -76,6 +79,8 @@ void loop() {
 
   imu.poll();
 
+  Serial.println(imu.algorithmStatus, BIN);
+
   // Packet format:
   // >[./|],[./|],[./|],[./|],[float x],[float y],[float z],[float w],[us since last sample]
   
@@ -93,6 +98,15 @@ void loop() {
     
     Serial.print(lastFingerPositions[i] ? '.' : '|');
     Serial.print(',');
+  }
+
+  if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
+    analogWrite(vibePin, 45);
+//    digitalWrite(vibePin, HIGH);
+  }
+  else {
+    analogWrite(vibePin, 0);
+//    digitalWrite(vibePin, LOW);
   }
 
   for (int i = 0; i < 4; i++) {

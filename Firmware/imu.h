@@ -8,13 +8,15 @@
 class IMU {
   private:
     // HPR output
+    const byte sixAxisOutput = 0b00001000;
+    const byte nineAxisOutput = 0b00000000;
     const byte hprOutput = 0b00000100;
     const byte quaternionOutput = 0b00000000;
     const byte rawDataOutput = 0b00000010;
     const byte calibratedDataOutput = 0b00000000;
     const byte standbyEnabled = 0b00000001;
     const byte standbyDisabled = 0b00000000;
-    const byte algorithmControlDefaults = quaternionOutput + rawDataOutput + standbyDisabled;
+    const byte algorithmControlDefaults = quaternionOutput + rawDataOutput + standbyDisabled + sixAxisOutput;
 //    const byte algorithmControlDefaults = 0b00000100;
 
     struct accelerometerCalibrationData
@@ -68,6 +70,7 @@ class IMU {
     void sleep();
     void wake();
 
+    byte algorithmStatus;
     bool faulty;
 
     float ax, ay, az;
@@ -601,6 +604,8 @@ void IMU::poll() {
 
   }
   else faulty = false;
+
+  algorithmStatus = readByte(EM7180_ADDRESS, EM7180_AlgorithmStatus);
 
   // if no errors, see if new data is ready
 
