@@ -34,6 +34,12 @@ const byte fingerSwitchPins[] = {9, 10, 11, 12};
 bool lastFingerPositions[4];
 unsigned long lastFingerStableTimestamps[4];
 
+float lastOrientation[4];
+
+const float angularVelocityWindow = 5.0;
+const int historyLength = int(angularVelocityWindow);
+float angularVelocityHistory[historyLength];
+
 unsigned long lastTimestamp;
 
 IMU imu = IMU();
@@ -60,6 +66,7 @@ void setup() {
   }
 
   lastTimestamp = micros();
+
 }
 
 void loop() {
@@ -67,11 +74,11 @@ void loop() {
 
   if (Serial.available() >= 5) {
     for (int i = 0; i < Serial.available(); i++) {
-      if (Serial.read() == '>' 
-      && Serial.read() == 'A' 
-      && Serial.read() == 'T' 
-      && Serial.read() == '\r' 
-      && Serial.read() == '\n') {
+      if (Serial.read() == '>'
+          && Serial.read() == 'A'
+          && Serial.read() == 'T'
+          && Serial.read() == '\r'
+          && Serial.read() == '\n') {
         Serial.println(">OK");
       }
     }
@@ -79,11 +86,35 @@ void loop() {
 
   imu.poll();
 
-  Serial.println(imu.algorithmStatus, BIN);
+  float theta = 0;
+
+  if (lastOrientation[0] != 0 || lastOrientation[1] != 0 || lastOrientation[2] != 0 || lastOrientation[3] != 0) {
+    // These quats are [x, y, z, w] not [w, x, y, z]
+    float inverse[] = {imu.Quat[0] * -1, imu.Quat[1] * -1, imu.Quat[2] * -1, imu.Quat[3]};
+    float delta[] = {0, 0, 0, 0};
+
+    quaternionMultiply(lastOrientation, inverse, delta);
+    
+    float norm = sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
+    theta = asin(norm) * 2;
+    debug_println(theta);
+
+    for (int i = angularVelocityWindow - 2; i >= 0; i--) {
+      angularVelocityHistory[i + 1] = angularVelocityHistory[i];
+    }
+
+    angularVelocityHistory[0] = theta;
+  }
+
+  for (int i = 0; i < 4; i++) {
+    lastOrientation[i] = imu.Quat[i];
+  }
+
+  //  Serial.println(imu.algorithmStatus, BIN);
 
   // Packet format:
   // >[./|],[./|],[./|],[./|],[float x],[float y],[float z],[float w],[us since last sample]
-  
+
   Serial.print('>');
 
   for (int i = 0; i < 4; i++) {
@@ -95,18 +126,27 @@ void loop() {
       lastFingerPositions[i] = fingerPosition;
       lastFingerStableTimestamps[i] = millis();
     }
-    
+
     Serial.print(lastFingerPositions[i] ? '.' : '|');
     Serial.print(',');
   }
 
-  if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
-    analogWrite(vibePin, 45);
-//    digitalWrite(vibePin, HIGH);
+  float averageVelocity = 0;
+  bool handIsMoving = false;
+  for (int i = 0; i < angularVelocityWindow; i++) {
+    averageVelocity += angularVelocityHistory[i];
+    if (angularVelocityHistory[i] > 0.03) {
+      handIsMoving = true;
+    }
   }
-  else {
+  averageVelocity /= angularVelocityWindow;
+
+  if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
+    if (handIsMoving) analogWrite(vibePin, 50);
+    else analogWrite(vibePin, 20);
+  }
+  else if (!handIsMoving) {
     analogWrite(vibePin, 0);
-//    digitalWrite(vibePin, LOW);
   }
 
   for (int i = 0; i < 4; i++) {
@@ -121,3 +161,11 @@ void loop() {
 
   lastTimestamp = timestamp;
 }
+
+void quaternionMultiply(float* q1, float* q2, float* out) {
+    out[0] =  q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0];
+    out[1] = -q1[0] * q2[2] + q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1];
+    out[2] =  q1[0] * q2[1] - q1[1] * q2[0] + q1[2] * q2[3] + q1[3] * q2[2];
+    out[3] = -q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] + q1[3] * q2[3];
+}
+
