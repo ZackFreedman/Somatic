@@ -159,8 +159,23 @@ class GestureTrainingSet:
     def add(self, example: Gesture):
         self.examples.append(example)
 
+    def get_examples_for(self, glyph):
+        return [example for example in self.examples if example.glyph == glyph]
+
     def count(self, glyph):
-        return len([example for example in self.examples if example.glyph == glyph])
+        return len(self.get_examples_for(glyph))
 
     def summarize(self):
         return {glyph: self.count(glyph) for glyph in self.big_ole_list_o_glyphs}
+
+    def remove(self, example):
+        if example in self.examples:
+            self.examples.remove(example)
+
+    def move(self, example, new_glyph):
+        if example in self.examples:
+            example.glyph = new_glyph
+
+    def remove_at(self, glyph, index):
+        if index < self.count(glyph):
+            self.examples.remove(self.get_examples_for(glyph)[index])
