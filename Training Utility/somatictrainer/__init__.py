@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 def log_error(*args):
-    logging.exception(traceback.format_exception(*args))
+    logging.exception('whoops')
 
 
 tkinter.Tk.report_callback_exception = log_error

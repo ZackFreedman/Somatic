@@ -21,7 +21,7 @@ class Gesture:
         :param glyph:
         :type glyph: str
         """
-        if normalized_quats is not None and not len(normalized_quats) is 100:
+        if normalized_quats is not None and not len(normalized_quats) is 99:
             raise AttributeError('Normalized data invalid - got {} normalized_data instead of {}'
                                  .format(len(normalized_quats), standard_gesture_time / sampling_rate))
 
@@ -49,9 +49,9 @@ class Gesture:
         try:
             glyph = datastore['g']
 
-            raw_data = [(np.quaternion(w=e[0], x=e[1], y=e[2], z=e[3]), e[4]) for e in datastore['r']]
-            normalized_quats = [np.quaternion(w=e[0], x=e[1], y=e[2], z=e[3]) for e in datastore['n']]
-            assert len(normalized_quats) is round(standard_gesture_time / sampling_rate)
+            raw_data = [(np.quaternion(e[0], e[1], e[2], e[3]), e[4]) for e in datastore['r']]
+            normalized_quats = [np.quaternion(e[0], e[1], e[2], e[3]) for e in datastore['n']]
+            # assert len(normalized_quats) is round(standard_gesture_time / sampling_rate)
 
             return Gesture(glyph, raw_data, normalized_quats)
 
@@ -146,6 +146,8 @@ class GestureTrainingSet:
 
             for sample_record in datastore['examples']:
                 output.add(Gesture.from_dict(sample_record))
+
+            logging.info(output)
 
             return output
 
