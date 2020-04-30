@@ -8,6 +8,7 @@
 class IMU {
   private:
     // HPR output
+    const byte enuOutput = 0b00100000;
     const byte sixAxisOutput = 0b00001000;
     const byte nineAxisOutput = 0b00000000;
     const byte hprOutput = 0b00000100;
@@ -16,8 +17,8 @@ class IMU {
     const byte calibratedDataOutput = 0b00000000;
     const byte standbyEnabled = 0b00000001;
     const byte standbyDisabled = 0b00000000;
-    const byte algorithmControlDefaults = quaternionOutput + rawDataOutput + standbyDisabled + sixAxisOutput;
-//    const byte algorithmControlDefaults = 0b00000100;
+    const byte algorithmControlDefaults = hprOutput + calibratedDataOutput + standbyDisabled + sixAxisOutput;
+    //    const byte algorithmControlDefaults = 0b00000100;
 
     struct accelerometerCalibrationData
     {
@@ -66,7 +67,7 @@ class IMU {
     IMU() {}
 
     void setup();
-    void poll();
+    uint8_t poll();
     void sleep();
     void wake();
 
@@ -85,8 +86,8 @@ byte IMU::readByte(uint8_t address, uint8_t subAddress)
   uint8_t data; // `data` will store the register data
   Wire.beginTransmission(address);         // Initialize the Tx buffer
   Wire.write(subAddress);                   // Put slave register address in Tx buffer
-//  Wire.endTransmission(I2C_NOSTOP);        // Send the Tx buffer, but send a restart to keep connection alive
-    Wire.endTransmission(false);             // Send the Tx buffer, but send a restart to keep connection alive
+  //  Wire.endTransmission(I2C_NOSTOP);        // Send the Tx buffer, but send a restart to keep connection alive
+  Wire.endTransmission(false);             // Send the Tx buffer, but send a restart to keep connection alive
   //  Wire.requestFrom(address, 1);  // Read one byte from slave register address
   Wire.requestFrom(address, (size_t) 1);   // Read one byte from slave register address
   data = Wire.read();                      // Fill Rx buffer with result
@@ -97,8 +98,8 @@ void IMU::readBytes(uint8_t address, uint8_t subAddress, uint8_t count, uint8_t 
 {
   Wire.beginTransmission(address);   // Initialize the Tx buffer
   Wire.write(subAddress);            // Put slave register address in Tx buffer
-//  Wire.endTransmission(I2C_NOSTOP);  // Send the Tx buffer, but send a restart to keep connection alive
-    Wire.endTransmission(false);       // Send the Tx buffer, but send a restart to keep connection alive
+  //  Wire.endTransmission(I2C_NOSTOP);  // Send the Tx buffer, but send a restart to keep connection alive
+  Wire.endTransmission(false);       // Send the Tx buffer, but send a restart to keep connection alive
   uint8_t i = 0;
   //        Wire.requestFrom(address, count);  // Read bytes from slave register address
   Wire.requestFrom(address, (size_t) count);  // Read bytes from slave register address
@@ -121,7 +122,7 @@ uint8_t IMU::M24512DFMreadByte(uint8_t device_address, uint8_t data_address1, ui
   Wire.beginTransmission(device_address);         // Initialize the Tx buffer
   Wire.write(data_address1);                      // Put slave register address in Tx buffer
   Wire.write(data_address2);                      // Put slave register address in Tx buffer
-//  Wire.endTransmission(I2C_NOSTOP);               // Send the Tx buffer, but send a restart to keep connection alive
+  //  Wire.endTransmission(I2C_NOSTOP);               // Send the Tx buffer, but send a restart to keep connection alive
   Wire.endTransmission(false);
   Wire.requestFrom(device_address, (size_t)1);   // Read one byte from slave register address
   data = Wire.read();                             // Fill Rx buffer with result
@@ -133,7 +134,7 @@ void IMU::M24512DFMreadBytes(uint8_t device_address, uint8_t data_address1, uint
   Wire.beginTransmission(device_address);            // Initialize the Tx buffer
   Wire.write(data_address1);                         // Put slave register address in Tx buffer
   Wire.write(data_address2);                         // Put slave register address in Tx buffer
-//  Wire.endTransmission(I2C_NOSTOP);                  // Send the Tx buffer, but send a restart to keep connection alive
+  //  Wire.endTransmission(I2C_NOSTOP);                  // Send the Tx buffer, but send a restart to keep connection alive
   Wire.endTransmission(false);
   uint8_t i = 0;
   Wire.requestFrom(device_address, (size_t)count);  // Read bytes from slave register address
@@ -460,7 +461,7 @@ void IMU::setup()
   // Do a forceful reset in case something funny happened during programming
   writeByte(EM7180_ADDRESS, EM7180_ResetRequest, 1);
 
-  delay(500);
+  delay(2000);
 
   // Read SENtral device information
   uint16_t ROM1 = readByte(EM7180_ADDRESS, EM7180_ROMVersion1);
@@ -504,7 +505,17 @@ void IMU::setup()
   // Load warm start and accelerometer calibration data
   enterPassthrough();
   accelerometerCalibrationData calibration = loadAccelerometerCalibrationData();
-//  warmStartData warmData = loadWarmStartData();
+  Serial.print("Acc Calibration:");
+  for (int i = 0; i < 3; i++) {
+    Serial.print(" (");
+    Serial.print(calibration.accZero_min[i]);
+    Serial.print(',');
+    Serial.print(calibration.accZero_max[i]);
+    Serial.print(')');
+  }
+  Serial.println();
+
+  //  warmStartData warmData = loadWarmStartData();
   leavePassthrough();
 
   // Set up the SENtral as sensor bus in normal operating mode
@@ -513,7 +524,7 @@ void IMU::setup()
   writeByte(EM7180_ADDRESS, EM7180_PassThruControl, 0x00); // make sure pass through mode is off
   calibrateAccelerometer(calibration);
   writeByte(EM7180_ADDRESS, EM7180_HostControl, 0x01); // Cargo-culted in from example. Labeled 'Force initialize'.
-//  warmStart(warmData);
+  //  warmStart(warmData);
   writeByte(EM7180_ADDRESS, EM7180_HostControl, 0x00); // Complete warm start
   // Set accel/gyro/mag refresh rates
   writeByte(EM7180_ADDRESS, EM7180_QRateDivisor, 0x02); // 100 Hz
@@ -579,7 +590,7 @@ void IMU::setup()
   //    delay(1000); // give some time to read the screen
 }
 
-void IMU::poll() {
+uint8_t IMU::poll() {
   // Check event status register, way to chech data ready by polling rather than interrupt
   uint8_t eventStatus = readByte(EM7180_ADDRESS, EM7180_EventStatus); // reading clears the register
 
@@ -609,40 +620,41 @@ void IMU::poll() {
 
   // if no errors, see if new data is ready
 
-  /*
-    if (eventStatus & 0x10) { // new acceleration data available
+  int16_t accelCount[4];
+
+  if (eventStatus & 0x10) { // new acceleration data available
     readSENtralAccelData(accelCount);
 
     // Now we'll calculate the accleration value into actual g's
     ax = (float)accelCount[0] * 0.000488; // get actual g value
     ay = (float)accelCount[1] * 0.000488;
     az = (float)accelCount[2] * 0.000488;
-    }
+  }
 
+  /*
     if (eventStatus & 0x20) { // new gyro data available
-    readSENtralGyroData(gyroCount);
+      readSENtralGyroData(gyroCount);
 
-    // Now we'll calculate the gyro value into actual dps's
-    gx = (float)gyroCount[0] * 0.153; // get actual dps value
-    gy = (float)gyroCount[1] * 0.153;
-    gz = (float)gyroCount[2] * 0.153;
+      // Now we'll calculate the gyro value into actual dps's
+      gx = (float)gyroCount[0] * 0.153; // get actual dps value
+      gy = (float)gyroCount[1] * 0.153;
+      gz = (float)gyroCount[2] * 0.153;
     }
 
     if (eventStatus & 0x08) { // new mag data available
-    readSENtralMagData(magCount);
+      readSENtralMagData(magCount);
 
-    // Calculate the magnetometer values in milliGauss
-    // Temperature-compensated magnetic field is in 32768 LSB/10 microTesla
-    mx = (float)magCount[0] * 0.32768; // get actual magnetometer value in mGauss
-    my = (float)magCount[1] * 0.32768;
-    mz = (float)magCount[2] * 0.32768;
+      // Calculate the magnetometer values in milliGauss
+      // Temperature-compensated magnetic field is in 32768 LSB/10 microTesla
+      mx = (float)magCount[0] * 0.32768; // get actual magnetometer value in mGauss
+      my = (float)magCount[1] * 0.32768;
+      mz = (float)magCount[2] * 0.32768;
     }
   */
 
   //    if (readByte(EM7180_ADDRESS, EM7180_EventStatus) & 0x04) { // new quaternion data available
   if (eventStatus & 0x04) { // new quaternion data available
     readSENtralQuatData(Quat);
-    /*
     Yaw   = atan2(2.0f * (Quat[0] * Quat[1] + Quat[3] * Quat[2]), Quat[3] * Quat[3] + Quat[0] * Quat[0] - Quat[1] * Quat[1] - Quat[2] * Quat[2]);
     Pitch = -asin(2.0f * (Quat[0] * Quat[2] - Quat[3] * Quat[1]));
     Roll  = atan2(2.0f * (Quat[3] * Quat[0] + Quat[1] * Quat[2]), Quat[3] * Quat[3] - Quat[0] * Quat[0] - Quat[1] * Quat[1] + Quat[2] * Quat[2]);
@@ -650,12 +662,14 @@ void IMU::poll() {
     Yaw   *= 180.0f / PI;
     Yaw   -= 12.9f; // Declination in lower Manhattan
     Roll  *= 180.0f / PI;
-    */
 
-    Yaw = (Quat[0] * 180.0f / PI) - 12.9f;
-    Pitch = Quat[1] * 180.0f / PI;
-    Roll = Quat[2] * 180.0f / PI;
+    //    Yaw = (Quat[0] * 180.0f / PI) - 12.9f;
+    //    Pitch = Quat[1] * 180.0f / PI;
+    //    Roll = Quat[2] * 180.0f / PI;
+    
   }
+
+  return eventStatus;
 }
 
 void IMU::sleep() {

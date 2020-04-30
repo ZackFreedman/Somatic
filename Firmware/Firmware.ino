@@ -21,13 +21,15 @@
 
 #define sanity(x) debug_println("Sanity " #x)
 
+#define bt Serial
+
 // End dumb debugging bullshit
 
 //#include <i2c_t3.h>
 #include <Wire.h>
 #include "imu.h"
 
-unsigned long fingerDebounce = 50;
+unsigned long fingerDebounce = 100;
 
 const byte vibePin = 23;
 const byte fingerSwitchPins[] = {9, 10, 11, 12};
@@ -40,13 +42,22 @@ const float angularVelocityWindow = 5.0;
 const int historyLength = int(angularVelocityWindow);
 float angularVelocityHistory[historyLength];
 
+elapsedMillis timeSinceLastGesture;
 unsigned long lastTimestamp;
 
 IMU imu = IMU();
 
 void setup() {
+  //  Wire.beginTransmission(0x24);
+  //  Wire.write(0x03); // Select control register
+  //  Wire.write(0x3F); // Assign pins 0-5 to inputs
+  //  byte error = Wire.endTransmission();
+
   //  Wire.begin(I2C_MASTER, 0x00, I2C_PINS_18_19, I2C_PULLUP_INT, I2C_RATE_400);
   Serial.begin(115200);
+  bt.begin(115200);
+
+  analogWriteFrequency(vibePin, 93750);
 
   // Some butt-head didn't leave room for i2c pullups on the lil board.
   // Using adjacent pins as makeshift 3V3 sources :|
@@ -72,100 +83,154 @@ void setup() {
 void loop() {
   unsigned long timestamp = micros();
 
-  if (Serial.available() >= 5) {
-    for (int i = 0; i < Serial.available(); i++) {
-      if (Serial.read() == '>'
-          && Serial.read() == 'A'
-          && Serial.read() == 'T'
-          && Serial.read() == '\r'
-          && Serial.read() == '\n') {
-        Serial.println(">OK");
+  //  bool debugKnobDown = false;
+  //
+  //  Wire.beginTransmission(0x24);
+  //  Wire.write(0x00);                // go to the input port register
+  //  Wire.endTransmission();
+  //  Wire.requestFrom(0x24, 1);     // start read mode
+  //  if (Wire.available()) {
+  //    byte buttonStates = Wire.read();  // fetch one byte
+  //    Wire.endTransmission();
+  //    Serial.println(buttonStates);
+  //    if (buttonStates & 0b00000001)
+  //      debugKnobDown = true;
+  //  }
+
+  if (bt.available() >= 5) {
+    for (int i = 0; i < bt.available(); i++) {
+      if (bt.read() == '>'
+          && bt.read() == 'A'
+          && bt.read() == 'T'
+          && bt.read() == '\r'
+          && bt.read() == '\n') {
+        bt.println(">OK");
       }
     }
   }
 
-  imu.poll();
+  // TODO: Handle %CONNECT,5800E382649E,0 and %DISCONNECT messages from bt
 
-  float theta = 0;
+  if (imu.poll() & 0x04) {  // Only send data when we have new AHRS
+    float theta = 0;
 
-  if (lastOrientation[0] != 0 || lastOrientation[1] != 0 || lastOrientation[2] != 0 || lastOrientation[3] != 0) {
-    // These quats are [x, y, z, w] not [w, x, y, z]
-    float inverse[] = {imu.Quat[0] * -1, imu.Quat[1] * -1, imu.Quat[2] * -1, imu.Quat[3]};
-    float delta[] = {0, 0, 0, 0};
+    if (lastOrientation[0] != 0 || lastOrientation[1] != 0 || lastOrientation[2] != 0 || lastOrientation[3] != 0) {
+      // These quats are [x, y, z, w] not [w, x, y, z]
+      float inverse[] = {imu.Quat[0] * -1, imu.Quat[1] * -1, imu.Quat[2] * -1, imu.Quat[3]};
+      float delta[] = {0, 0, 0, 0};
 
-    quaternionMultiply(lastOrientation, inverse, delta);
-    
-    float norm = sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
-    theta = asin(norm) * 2;
-    debug_println(theta);
+      quaternionMultiply(lastOrientation, inverse, delta);
 
-    for (int i = angularVelocityWindow - 2; i >= 0; i--) {
-      angularVelocityHistory[i + 1] = angularVelocityHistory[i];
+      float norm = sqrt(delta[0] * delta[0] + delta[1] * delta[1]);
+      theta = asin(norm) * 2;
+      //    debug_println(theta);
+
+      for (int i = angularVelocityWindow - 2; i >= 0; i--) {
+        angularVelocityHistory[i + 1] = angularVelocityHistory[i];
+      }
+
+      angularVelocityHistory[0] = theta;
     }
 
-    angularVelocityHistory[0] = theta;
-  }
-
-  for (int i = 0; i < 4; i++) {
-    lastOrientation[i] = imu.Quat[i];
-  }
-
-  //  Serial.println(imu.algorithmStatus, BIN);
-
-  // Packet format:
-  // >[./|],[./|],[./|],[./|],[float x],[float y],[float z],[float w],[us since last sample]
-
-  Serial.print('>');
-
-  for (int i = 0; i < 4; i++) {
-    bool fingerPosition = digitalRead(fingerSwitchPins[i]);
-    if (fingerPosition == lastFingerPositions[i]) {
-      lastFingerStableTimestamps[i] = millis();
-    }
-    else if (millis() - lastFingerStableTimestamps[i] >= fingerDebounce) {
-      lastFingerPositions[i] = fingerPosition;
-      lastFingerStableTimestamps[i] = millis();
+    for (int i = 0; i < 4; i++) {
+      lastOrientation[i] = imu.Quat[i];
     }
 
-    Serial.print(lastFingerPositions[i] ? '.' : '|');
-    Serial.print(',');
-  }
+    //  Serial.println(imu.algorithmStatus, BIN);
 
-  float averageVelocity = 0;
-  bool handIsMoving = false;
-  for (int i = 0; i < angularVelocityWindow; i++) {
-    averageVelocity += angularVelocityHistory[i];
-    if (angularVelocityHistory[i] > 0.03) {
-      handIsMoving = true;
+    //   Packet format:
+    //   >[./|],[./|],[./|],[./|],[float h],[float p],[float r],[float accel x],[accel y],[accel z],[us since last sample]
+
+    bt.print('>');
+
+    for (int i = 0; i < 4; i++) {
+      bool fingerPosition = digitalRead(fingerSwitchPins[i]);
+      if (fingerPosition == lastFingerPositions[i]) {
+        lastFingerStableTimestamps[i] = millis();
+      }
+      else if (millis() - lastFingerStableTimestamps[i] >= fingerDebounce) {
+        lastFingerPositions[i] = fingerPosition;
+        lastFingerStableTimestamps[i] = millis();
+      }
+
+      bt.print(lastFingerPositions[i] ? '.' : '|');
+      bt.print(',');
     }
+
+    float averageVelocity = 0;
+    bool handIsMoving = false;
+    for (int i = 0; i < angularVelocityWindow; i++) {
+      averageVelocity += angularVelocityHistory[i];
+      if (angularVelocityHistory[i] > 0.05) {
+        handIsMoving = true;
+      }
+    }
+    averageVelocity /= angularVelocityWindow;
+
+    if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
+      if (handIsMoving) analogWrite(vibePin, 75);
+      else analogWrite(vibePin, 0);
+    }
+    else if (!handIsMoving) {
+      analogWrite(vibePin, 0);
+    }
+
+    //  for (int i = 0; i < 3; i++) {
+    //    bt.print(imu.Quat[i], 4);
+    //    // Actually heading, pitch, and roll
+    //    bt.print(',');
+    //  }
+
+    //  if (imu.Quat[0] >= 0)
+    //    bt.print(imu.Quat[0]);
+    //  else
+    //    bt.print(imu.Quat[0] + 2 * PI);
+
+    bt.print(imu.Quat[0] * -1);
+    bt.print(',');
+
+    bt.print(imu.Quat[1]);
+    bt.print(',');
+
+    bt.print(imu.Quat[2]);
+    bt.print(',');
+
+    bt.print(imu.ax, 4);
+    bt.print(',');
+
+    bt.print(imu.ay, 4);
+    bt.print(',');
+
+    bt.print(imu.az, 4);
+    bt.print(',');
+
+    // Not sure if this is where the delta should be calculated
+    bt.println(timestamp - lastTimestamp);
+    //  bt.print(imu.Quat[0] * 180 / PI);
+    //  bt.print(',');
+    //  bt.print(imu.Quat[1] * 180 / PI);
+    //  bt.print(',');
+    //  bt.print(imu.Quat[2] * 180 / PI);
+    //  bt.println();
+
+    lastTimestamp = timestamp;
   }
-  averageVelocity /= angularVelocityWindow;
-
-  if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
-    if (handIsMoving) analogWrite(vibePin, 50);
-    else analogWrite(vibePin, 20);
-  }
-  else if (!handIsMoving) {
-    analogWrite(vibePin, 0);
-  }
-
-  for (int i = 0; i < 4; i++) {
-    Serial.print(imu.Quat[i]);
-    Serial.print(',');
-  }
-
-  // Not sure if this is where the delta should be calculated
-  Serial.println(timestamp - lastTimestamp);
-
-  delay(20);
-
-  lastTimestamp = timestamp;
 }
 
 void quaternionMultiply(float* q1, float* q2, float* out) {
-    out[0] =  q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0];
-    out[1] = -q1[0] * q2[2] + q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1];
-    out[2] =  q1[0] * q2[1] - q1[1] * q2[0] + q1[2] * q2[3] + q1[3] * q2[2];
-    out[3] = -q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] + q1[3] * q2[3];
+  out[0] =  q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0];
+  out[1] = -q1[0] * q2[2] + q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1];
+  out[2] =  q1[0] * q2[1] - q1[1] * q2[0] + q1[2] * q2[3] + q1[3] * q2[2];
+  out[3] = -q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] + q1[3] * q2[3];
 }
 
+//void configureBluetooth() {
+//  while (bt.available()) bt.read();
+//
+//  bt.print("$$$");
+//  delay(50);
+//
+//  while (bt.available()) {
+//    if (bt.read() == 'O')
+//  }
+//}

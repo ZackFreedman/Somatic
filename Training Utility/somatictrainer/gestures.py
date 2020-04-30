@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Any
 import numpy as np
 import quaternion
 
@@ -11,36 +11,32 @@ logging.basicConfig(level=logging.INFO)
 
 
 class Gesture:
-    def __init__(self, glyph, raw_data, normalized_quats=None):
+    def __init__(self, glyph, bearings, accelerations):
         """
 
-        :param normalized_quats:
-        :type normalized_quats: list of np.quaternion or None
-        :param raw_data:
-        :type raw_data list of tuple of np.quaternion, float or None
+        :param bearings:
+        :type bearings: np.array
+        :param accelerations:
+        :type accelerations: np.array
         :param glyph:
         :type glyph: str
         """
-        if normalized_quats is not None and not len(normalized_quats) is 99:
-            raise AttributeError('Normalized data invalid - got {} normalized_data instead of {}'
-                                 .format(len(normalized_quats), standard_gesture_time / sampling_rate))
 
-        if raw_data is None:
-            raise AttributeError('Must provide one source of data')
+        expected_count = round(standard_gesture_time / sampling_rate)
 
-        if normalized_quats is None:
-            normalized_quats = Gesture.normalize_samples(raw_data)
+        if len(bearings) != expected_count or accelerations.shape != (expected_count, 3):
+            raise AttributeError('Data invalid - got {} orientations and {} acceleration data shape instead of {}'
+                                 .format(len(bearings), accelerations.shape, expected_count))
 
-        self.raw_quats = [x[0] for x in raw_data]
-        self.raw_timedeltas = [x[1] for x in raw_data]
-        self.normalized_data = normalized_quats
+        self.bearings = bearings
+        self.accelerations = accelerations
         self.glyph = glyph
 
     def to_dict(self):
         datastore = {
             'g': self.glyph,
-            'r': [(s.w, s.x, s.y, s.z, ts) for s, ts in zip(self.raw_quats, self.raw_timedeltas)],
-            'n': [(s.w, s.x, s.y, s.z) for s in self.normalized_data]
+            'b': self.bearings.tolist(),
+            'a': self.accelerations.tolist()
         }
         return datastore
 
@@ -49,84 +45,26 @@ class Gesture:
         try:
             glyph = datastore['g']
 
-            raw_data = [(np.quaternion(e[0], e[1], e[2], e[3]), e[4]) for e in datastore['r']]
-            normalized_quats = [np.quaternion(e[0], e[1], e[2], e[3]) for e in datastore['n']]
-            # assert len(normalized_quats) is round(standard_gesture_time / sampling_rate)
+            bearings = np.array(datastore['b'])
+            assert len(bearings) == round(standard_gesture_time / sampling_rate)
 
-            return Gesture(glyph, raw_data, normalized_quats)
+            accelerations = np.array(datastore['a'])
+            assert accelerations.shape == (round(standard_gesture_time / sampling_rate), 3)
+
+            return Gesture(glyph, bearings, accelerations)
 
         except (AssertionError, AttributeError, KeyError):
             logging.exception('Error parsing dict {}...'.format(str(datastore)[:20]))
 
         return None
 
-    @staticmethod
-    def normalize_samples(samples: List[Tuple[np.quaternion, int]]):
-        if not samples:
-            raise AttributeError('Samples and/or timedeltas not provided')
-
-        if not len(samples):
-            raise AttributeError('Samples and/or timedeltas list are empty')
-
-        logging.info('Normalizing:\n{0!r}'.format(samples))
-
-        quats = [x[0] for x in samples]
-        timedeltas = [x[1] for x in samples]
-
-        scaling_factor = standard_gesture_time / sum(timedeltas)
-        # Standardize times to 1 second
-        scaled_times = [delta * scaling_factor for delta in timedeltas]
-
-        logging.debug(scaled_times)
-
-        output = []
-
-        # Interpolate to increase/reduce number of samples to required sampling rate
-        for earliest_time in range(0, standard_gesture_time - sampling_rate, sampling_rate):
-            # For each sample required, find the latest sample before this time, and the earliest sample
-            # after this time, and slerp them.
-
-            early_sample = None
-            early_time = None
-            late_sample = None
-            late_time = None
-
-            latest_time = earliest_time + sampling_rate
-
-            sample_time = 0
-            for index, sample in enumerate(quats):
-                if index:
-                    sample_time += scaled_times[index]
-
-                if early_sample is None and sample_time >= earliest_time:
-                    # This sample is the latest sample that began earlier than the early time.
-                    early_sample = quats[index]
-                    early_time = sample_time - scaled_times[index]
-
-                if late_sample is None and sample_time >= latest_time:
-                    # This sample is the latest sample that began earlier than the late time.
-                    late_sample = quats[index]
-                    late_time = sample_time
-
-                if early_sample and late_sample:
-                    continue
-
-            if early_sample is None or late_sample is None:
-                raise AttributeError('Something went wrong - missing data {0} and {1}. Got {2} and {3}'
-                                     .format(earliest_time, latest_time, early_sample, late_sample))
-
-            # amount = (earliest_time - early_time) / (late_time - early_time)  # Just the Arduino map function
-            # output.append(quaternion.quaternion_time_series.slerp(early_sample, late_sample, amount))
-            output.append(quaternion.quaternion_time_series.slerp(
-                early_sample, late_sample, early_time, late_time, earliest_time))
-
-        return output
-
 
 class GestureTrainingSet:
+    examples: List[Gesture]
+
     big_ole_list_o_glyphs = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.,?!@#/ 1234567890'
     short_glyphs = '., '
-    current_version = 1  # For deleting old saves
+    current_version = 2  # For deleting old saves
 
     def __init__(self):
         self.target_examples_per_glyph = 100
@@ -179,3 +117,14 @@ class GestureTrainingSet:
     def remove_at(self, glyph, index):
         if index < self.count(glyph):
             self.examples.remove(self.get_examples_for(glyph)[index])
+
+    def to_training_set(self):
+        data = []
+        labels = []
+
+        for example in self.examples:
+            input = [[q.w, q.x, q.y, q.z] for q in example.normalized_data]
+            data.append(input)
+            labels.append(ord(example.glyph) - ord('a'))
+
+        return np.array(data), np.array(labels)

@@ -1,7 +1,7 @@
 from tkinter import *
-from tkinter import messagebox, filedialog, ttk
+from tkinter import messagebox, filedialog, ttk, font
+
 import serial
-from array import array
 from serial import Serial, SerialException
 from serial.tools.list_ports import comports
 import logging
@@ -14,17 +14,19 @@ import json
 import os
 from PIL import Image, ImageTk, ImageDraw
 from enum import Enum
-from somatictrainer.gestures import Gesture, GestureTrainingSet
+import tensorflow.keras as keras
+from somatictrainer.util import *
+from somatictrainer.gestures import Gesture, GestureTrainingSet, standard_gesture_time, sampling_rate
 
 logging.basicConfig(level=logging.INFO)
 
 
 class SomaticTrainerHomeWindow(Frame):
+    model: keras.Model
     port: serial.Serial
     serial_sniffing_thread: threading.Thread
     training_set: GestureTrainingSet
 
-    # pointer_gesture = [False, False, False, True]
     pointer_gesture = [True, True, True, False]
 
     class State(Enum):
@@ -55,6 +57,8 @@ class SomaticTrainerHomeWindow(Frame):
             hand_bitmaps.append(hand_bitmap)
             self.hand_icons[i] = ImageTk.PhotoImage(image=hand_bitmap)
 
+        self.example_thumbnails = {}
+
         self.state = self.State.disconnected
 
         self.queue = Queue()
@@ -68,10 +72,13 @@ class SomaticTrainerHomeWindow(Frame):
         self.training_set = GestureTrainingSet()
 
         self.gesture_buffer = []
-        self.gesture_anchor = None
 
-        self.last_orientation_received = None
+        self.bearing_zero = None
+        self.gesture_hand_position = None
+        self.gesture_hand_velocity = None
+        self.last_bearing_received = None
         self.angular_velocity_window = deque(maxlen=5)
+        self.starting_velocity_estimation_buffer = deque(maxlen=10)
         self.last_coordinate_visualized = None
 
         self.master.title('Somatic Trainer')
@@ -165,7 +172,12 @@ class SomaticTrainerHomeWindow(Frame):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
+        # Debug code!
+        self.model = keras.models.load_model(
+            'E:\Dropbox\Projects\Source-Controlled Projects\Somatic\Training Utility\\2020-52-20T00-52.h5')
+
     def reload_glyph_picker(self):
+        scroll_position = self.glyph_picker.yview()[0]
         selected_item = self.get_selected_glyph()
 
         self.glyph_picker.delete(*self.glyph_picker.get_children())
@@ -178,6 +190,7 @@ class SomaticTrainerHomeWindow(Frame):
         if selected_item is not None:
             self.glyph_picker.focus(selected_item)
             self.glyph_picker.selection_set(selected_item)
+            self.glyph_picker.yview_moveto(scroll_position)
 
     def get_selected_glyph(self):
         selected_item = self.glyph_picker.selection()[0] if len(self.glyph_picker.selection()) else None
@@ -194,9 +207,13 @@ class SomaticTrainerHomeWindow(Frame):
             return
 
         for index, example in enumerate(self.training_set.get_examples_for(selected_glyph)):
-            thumbnail = ImageTk.PhotoImage(
-                image=_gesture_to_image(
-                    self.training_set.get_examples_for(selected_glyph)[index].normalized_data, 50, 50, 2, 2, 2))
+            if example in self.example_thumbnails:
+                thumbnail = self.example_thumbnails[example]
+            else:
+                thumbnail = ImageTk.PhotoImage(
+                    image=_gesture_to_image(
+                        self.training_set.get_examples_for(selected_glyph)[index].normalized_data, 50, 50, 2, 2, 2))
+                self.example_thumbnails[example] = thumbnail
 
             button = Button(self.thumbnail_frame, image=thumbnail)
             button.image = thumbnail  # Button doesn't have an image field - this monkey patch retains a reference
@@ -212,6 +229,10 @@ class SomaticTrainerHomeWindow(Frame):
                 self.reload_glyph_picker()
                 self.open_file_has_been_modified = True
 
+            # Right click on OSX
+            button.bind('<Button-2>', lambda event, g=selected_glyph, i=index: delete_on_right_click(g, i))
+
+            # Right click on Windows
             button.bind('<Button-3>', lambda event, g=selected_glyph, i=index: delete_on_right_click(g, i))
 
             button.grid(row=int(index / 5), column=index % 5)
@@ -247,10 +268,12 @@ class SomaticTrainerHomeWindow(Frame):
                     logging.info('Got ack - connected')
 
             if command['type'] is 'rx':
-                orientation = command['quat']
+                bearing = command['bearing']
+                accelerometer = command['accel']
+                position = command['position']
                 if self.state is not self.State.disconnected and self.state is not self.State.quitting:
                     self.update_status(command['fingers'],
-                                       orientation.w, orientation.x, orientation.y, orientation.z,
+                                       bearing, accelerometer,
                                        command['freq'])
 
                     fingers = command['fingers']
@@ -260,10 +283,8 @@ class SomaticTrainerHomeWindow(Frame):
                         self.last_hand_id = hand_id
 
                 if self.state is self.State.recording:
-                    roll, yaw, pitch = quaternion.as_rotation_vector(orientation)
-
-                    x_coord = np.tan(pitch) * 125 + 125
-                    y_coord = np.tan(yaw) * -125 + 125
+                    x_coord = np.tan(bearing[0]) * 250 + 125/2
+                    y_coord = np.tan(bearing[1]) * 250 + 125/2
 
                     logging.info('Rendering ({}, {})'.format(x_coord, y_coord))
 
@@ -279,6 +300,13 @@ class SomaticTrainerHomeWindow(Frame):
 
                     self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
                                                   fill='SeaGreen1')
+
+                    if position is not None:
+                        x_coord = position[1] + 125
+                        y_coord = position[2] + 125
+
+                        self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
+                                                      fill='red')
 
             if command['type'] is 'quit':
                 self.master.destroy()
@@ -465,7 +493,9 @@ class SomaticTrainerHomeWindow(Frame):
                 logging.debug('Received packet {}'.format(incoming))
 
                 # Packet format:
-                # >[./|],[./|],[./|],[./|],[float x],[float y],[float z],[float w],[us since last sample]
+                # >[./|],[./|],[./|],[./|],
+                # [float o.h],[float o.p],[float o.r],
+                # [float a.x], [float a.y], [float a.z], [us since last sample]
 
                 if incoming.count('>') is not 1:
                     logging.debug('Packet corrupt - missing delimeter(s)')
@@ -479,7 +509,7 @@ class SomaticTrainerHomeWindow(Frame):
                     self.queue.put({'type': 'ack'})
                     continue
 
-                if incoming.count(',') is not 8:
+                if incoming.count(',') is not 10:
                     logging.debug('Packet corrupt - insufficient fields')
                     continue
 
@@ -489,47 +519,112 @@ class SomaticTrainerHomeWindow(Frame):
                 fingers = list(map(lambda i: i is '.', tokens[:4]))
                 logging.debug('Fingers: {0}'.format(fingers))
 
-                x, y, z, w = map(float, tokens[4:-1])
+                bearing = np.array([float(t) for t in tokens[4:7]])
 
-                orientation = np.quaternion(w, x, y, z)
+                # orientation = quaternion.quaternion(w, x, y, z)
+
+                local_acceleration = np.array([float(t) for t in tokens[7:10]])
 
                 microseconds = float(tokens[-1])
 
                 logging.debug('Sample parsed')
 
-                self.handle_sample(fingers, orientation, microseconds)
+                self.handle_sample(fingers, bearing, local_acceleration, microseconds)
 
-    def handle_sample(self, fingers, orientation, microseconds):
+    def handle_sample(self, fingers, bearing, local_acceleration, microseconds):
         """
 
         :type fingers: list of bool
-        :type orientation: np.quaternion
+        :type bearing: np.array
+        :type local_acceleration: np.array
         :type microseconds: float
         """
+
+        # x_coord = np.tan(orientation.x + np.pi) * 125 + 125
+        # y_coord = np.tan(orientation.y) * -125 + 125
+        #
+        # logging.info('Rendering ({}, {})'.format(x_coord, y_coord))
+        #
+        # self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
+        #                               fill='SeaGreen1')
+
+        # orientation = quaternion.from_euler_angles(bearing[1], bearing[2], bearing[0])
+        orientation = custom_euler_to_quat(bearing[0], bearing[1], bearing[2])
+        acceleration = quaternion.rotate_vectors(orientation, local_acceleration)
+
+        logging.info('Acceleration from gravity: {}'.format(acceleration))
+
+        acceleration[0] -= 0.005  # I think this is introduced by rounding/precision error
+        acceleration[1] -= 0.005
+        acceleration[2] -= 0.98  # Get outta here gravity
+
+        deadzone = 0
+        if abs(acceleration[0] - .5) <= deadzone:
+            acceleration[0] = .5
+        if abs(acceleration[1] - .5) <= deadzone:
+            acceleration[1] = .5
+        if abs(acceleration[2] - .5) <= deadzone:
+            acceleration[2] = .5
+
+        # Constrain acceleration to a reasonable level
+        max_acceleration_magnitude = 2
+        acceleration = np.clip(acceleration, -max_acceleration_magnitude, max_acceleration_magnitude)
+
+        # Convert acceleration to ML-ready 0.0-1.0 values
+        acceleration /= max_acceleration_magnitude * 2
+        acceleration += 0.5
+
+        self.starting_velocity_estimation_buffer.append((acceleration, microseconds))
+
+        logging.info('Scaled acceleration from movement: {}'.format(acceleration))
+
         if microseconds == 0:
             frequency = 0
         else:
             frequency = 1 / (microseconds / 1000000)
 
-        if self.state is self.State.recording:
-            if self.gesture_anchor:
-                orientation = (self.gesture_anchor * orientation)
+        if self.bearing_zero is not None:
+            # Constrain gesture to a cone
+            gesture_cone_angle = 2/3 * np.pi  # 120 degrees
 
-        if self.last_orientation_received:
-            delta = self.last_orientation_received * orientation.inverse()
-            norm = np.sqrt(sum((np.square(x) for x in delta.vec)))
-            theta = np.arcsin(norm) * 2
+            raw_bearing = bearing
 
-            self.angular_velocity_window.append(theta)
+            bearing = np.clip(bearing_delta(self.bearing_zero, bearing),
+                              -1/2 * gesture_cone_angle,
+                              1/2 * gesture_cone_angle)
 
-            # in_degrees = theta * 180 / np.pi
-            # logging.info('Angular velocity {} deg/frame'.format(np.round(in_degrees, 2)))
+            # Scale bearings to ML-ready 0.0-1.0 values
+            bearing /= gesture_cone_angle
+            bearing += 0.5
 
-        self.last_orientation_received = orientation
+        if self.last_bearing_received is not None:
+            y, p, r = bearing_delta(self.last_bearing_received, bearing)
+            norm = np.sqrt(sum(np.square([abs(y), abs(p)])))
 
-        gesture_eligible = (len([x for x in self.angular_velocity_window if x > 0.05])
+            logging.debug(
+                'Last: {} Counter: {} Delta: {}'.format(self.last_bearing_received, bearing, [y, p, r]))
+            logging.debug('Norm: {}'.format(norm))
+
+            if norm:
+                theta = np.arcsin(norm)
+            else:
+                theta = 0
+
+            angular_velocity = theta * frequency
+
+            self.angular_velocity_window.append(angular_velocity)
+
+            in_degrees = angular_velocity * 180 / np.pi
+            logging.info('Angular velocity {0:.2f} deg or {1:.2f} rad/s'.format(in_degrees, angular_velocity))
+
+        self.last_bearing_received = bearing
+
+        velocity_threshold = .5 if self.state is self.State.recording else 2
+
+        gesture_eligible = (len([x for x in self.angular_velocity_window if x > velocity_threshold])
                             and (fingers == self.pointer_gesture or self.state is self.State.recording))
-        # gesture_eligible = fingers == self.pointer_gesture
+
+        motion_scale = 100
 
         if gesture_eligible:
             if self.state is not self.State.recording:
@@ -538,25 +633,58 @@ class SomaticTrainerHomeWindow(Frame):
 
                 logging.info('Starting sample!')
                 self.status_line.configure(bg='SeaGreen1')
-                self.gesture_anchor = orientation.inverse()
-                orientation = np.quaternion(1, 0, 0, 0)
-                self.gesture_buffer.append((orientation, 0))
 
-                logging.info('Anchor quat: {0}'.format(self.gesture_anchor))
+                self.bearing_zero = bearing
+                self.gesture_hand_position = np.array([0.0, 0.0, 0.0])
+
+                self.gesture_hand_velocity = np.array([0.0, 0.0, 0.0])
+
+                for accel, time in self.starting_velocity_estimation_buffer:
+                    self.gesture_hand_velocity += (accel - 0.5) * time / 1000000 * motion_scale
+
+                bearing = np.array([0.5, 0.5, 0.5])
+
+                self.gesture_buffer.append((bearing, local_acceleration, 0))
+
                 self.state = self.State.recording
             else:
-                self.gesture_buffer.append((orientation, microseconds))
-                logging.debug('Relative: {0}'.format(str(orientation)))
+                self.gesture_buffer.append((bearing, acceleration, self.gesture_buffer[-1][2] + microseconds))
+                self.gesture_hand_velocity += (acceleration - 0.5) * microseconds / 1000000 * motion_scale
+                self.gesture_hand_position += self.gesture_hand_velocity * microseconds / 1000000 * motion_scale
+                logging.debug('Relative bearing: {0}'.format(str(bearing)))
+                logging.debug('Gesture position: ({0:.2f}, {1:.2f}, {2:.2f}'.
+                              format(self.gesture_hand_position[0],
+                                     self.gesture_hand_position[1],
+                                     self.gesture_hand_position[2]))
 
         else:
             if self.state is self.State.recording:
-                duration = sum([x[1] for x in self.gesture_buffer])
+                # duration = sum([x[2] for x in self.gesture_buffer])
+                duration = self.gesture_buffer[-1][2]
 
                 logging.info('Sample done, {} points, {} ms'.format(len(self.gesture_buffer), duration / 1000))
                 self.status_line.configure(bg='OliveDrab1')
 
+                # Debug Code!
+                # daters = [[q.w, q.x, q.y, q.z] for q in new_gesture.bearings]
+                # print(daters)
+                #
+                # results = self.model.predict([daters], batch_size=1)
+                # results = sorted([[chr(ord('a') + i), j] for i, j in enumerate(results[0])],
+                #                  key=lambda item: item[1], reverse=True)
+                #
+                # for index, value in results[:2]:
+                #     print('{}: {:.0f}'.format(index, value * 100))
+                #
+                # if duration > 300000:
+                #     self.path_display.create_text((125, 125), text=results[0][0], font=font.Font(family='Comic Sans', size=200))
+
                 def flash_red():
                     self.path_display.configure(bg='salmon1')
+                    self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
+
+                def flash_blue():
+                    self.path_display.configure(bg='SeaGreen1')
                     self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
 
                 def overlay_text(text):
@@ -564,20 +692,32 @@ class SomaticTrainerHomeWindow(Frame):
 
                 if len(self.glyph_picker.selection()) is 0:
                     overlay_text('Discarding - no glyph selected')
-                    flash_red()
+                    if duration > 300000:
+                        flash_blue()
+                    else:
+                        flash_red()
                 else:
                     selected_glyph = self.glyph_picker.selection()[0]
                     short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
 
-                    if short_glyph or duration > 300000:
-                        ahrs_data = [quaternion.as_rotation_vector(sample[0]) for sample in self.gesture_buffer]
-                        min_yaw = min(ahrs[1] for ahrs in ahrs_data)
-                        max_yaw = max(ahrs[1] for ahrs in ahrs_data)
-                        min_pitch = min(ahrs[2] for ahrs in ahrs_data)
-                        max_pitch = max(ahrs[2] for ahrs in ahrs_data)
+                    if duration > 0 and (short_glyph or duration > 300000):
+                        min_yaw = min(sample[0][0] for sample in self.gesture_buffer)
+                        max_yaw = max(sample[0][0] for sample in self.gesture_buffer)
+                        min_pitch = min(sample[0][1] for sample in self.gesture_buffer)
+                        max_pitch = max(sample[0][1] for sample in self.gesture_buffer)
 
                         if short_glyph or (max_yaw - min_yaw > np.pi / 8 or max_pitch - min_pitch > np.pi / 8):
-                            self.training_set.add(Gesture(selected_glyph, list(self.gesture_buffer)))
+                            try:
+                                processed_bearings, processed_accel = process_samples(self.gesture_buffer,
+                                                                                      standard_gesture_time,
+                                                                                      sampling_rate)
+
+                                new_gesture = Gesture('', processed_bearings, processed_accel)
+                            except AttributeError:
+                                logging.info("Couldn't create gesture")
+                                new_gesture = None
+
+                            self.training_set.add(new_gesture)
 
                             self.visualize([x[0] for x in self.gesture_buffer])
 
@@ -592,6 +732,7 @@ class SomaticTrainerHomeWindow(Frame):
                             self.reload_glyph_picker()
                             self.reload_example_list()
                             self.thumbnail_canvas.yview_moveto(1)
+
                         else:
                             overlay_text('Discarding - too small')
                             flash_red()
@@ -605,23 +746,30 @@ class SomaticTrainerHomeWindow(Frame):
         if self.queue.empty():
             self.queue.put({'type': 'rx',
                             'fingers': fingers,
-                            'quat': orientation,
+                            'bearing': bearing,
+                            'accel': acceleration,# if self.state is self.State.recording else local_acceleration,
+                            'position': self.gesture_hand_position,
                             'freq': frequency})
 
-    def update_status(self, fingers, w, x, y, z, frequency):
+    def update_status(self, fingers, bearing, accelerometer, frequency):
         def finger(value):
             return '.' if value else '|'
 
-        self.status_line.configure(text='Received {0}{1}{2}{3}_, ({4:.2f},{5:.2f},{6:.2f},{7:.2f}) at {8}Hz'.
-                                   format(finger(fingers[0]), finger(fingers[1]),
-                                          finger(fingers[2]), finger(fingers[3]),
-                                          w, x, y, z, round(frequency)),
-                                   bg='SeaGreen1' if self.state is self.State.recording else 'OliveDrab1')
+        text = 'Received {0}{1}{2}{3}_, ({4:.2f},{5:.2f},{6:.2f}, ({7:.2f}, {8:.2f}, {9:.2f}) at {10}Hz' \
+            .format(finger(fingers[0]), finger(fingers[1]),
+                    finger(fingers[2]), finger(fingers[3]),
+                    bearing[0], bearing[1], bearing[2],
+                    accelerometer[0], accelerometer[1], accelerometer[2],
+                    round(frequency))
+
+        self.status_line.configure(text=text, bg='SeaGreen1' if self.state is self.State.recording else 'OliveDrab1')
 
     def cancel_gesture(self):
         del self.gesture_buffer[:]
-        self.gesture_anchor = None
-        self.last_orientation_received = None
+        self.bearing_zero = None
+        self.gesture_hand_position = None
+        self.gesture_hand_velocity = None
+        self.last_bearing_received = None
         self.last_coordinate_visualized = None
 
     def visualize(self, path):
@@ -653,11 +801,9 @@ class SomaticTrainerHomeWindow(Frame):
 def _path_to_line_points(path, height, width, xpad=0, ypad=0):
     dots = []
 
-    for quat in path:
-        roll, yaw, pitch = quaternion.as_rotation_vector(quat)
-
-        x_coord = np.tan(pitch) * 120 + 122
-        y_coord = np.tan(yaw) * -120 + 122
+    for bearing in path:
+        x_coord = np.tan(bearing[1]) * 120 + 122
+        y_coord = np.tan(bearing[0]) * -120 + 122
         dots.append([x_coord, y_coord])
 
     min_x = min([coord[0] for coord in dots])
@@ -692,186 +838,6 @@ def _gesture_to_image(path, height, width, line_thiccness, xpad=0, ypad=0):
                          fill=(0, green, blue, 255),
                          width=line_thiccness)
 
-     # drawing.line(scaled_joints, fill=(0, 0, 255, 255), width=line_thiccness, joint='curve')
+    # drawing.line(scaled_joints, fill=(0, 0, 255, 255), width=line_thiccness, joint='curve')
 
     return img
-
-
-quat_test_data = [(np.quaternion(1, 0, 0, 0), 0), (
-np.quaternion(0.993842486840799, -0.0122157115900289, -0.000297944185122676, -0.00337670076472341), 20654.0), (
-                  np.quaternion(1.00009931472837, -0.0136061177872679, -0.00506505114708515, -0.00933558446717647),
-                  20654.0), (
-                  np.quaternion(0.994835634124541, -0.0156917270831264, -0.0238355348098124, -0.0493594200019863),
-                  20653.0), (
-                  np.quaternion(0.993743172112424, -0.0185718542059788, -0.0240341642665607, -0.0663422385539775),
-                  20655.0), (
-                  np.quaternion(0.992948654285431, -0.0180752805641077, -0.0303903068825107, -0.0955407686959976),
-                  20654.0), (
-                  np.quaternion(0.987684973681597, -0.0201608898599663, -0.0491607905452378, -0.135564604230807),
-                  20653.0), (
-                  np.quaternion(0.977256927202304, -0.0179759658357335, -0.0629655377892541, -0.152646737511173),
-                  20655.0), (
-                  np.quaternion(0.97904459231304, -0.0219485549707022, -0.0801469857979939, -0.169430926606416),
-                  20653.0), (
-                  np.quaternion(0.977058297745556, -0.0153937828980038, -0.0983215810904758, -0.158506306485252),
-                  20654.0), (
-                  np.quaternion(0.979839110140034, -0.00288012712285235, -0.110239348495382, -0.148972092561327),
-                  20655.0), (
-                  np.quaternion(0.981527460522395, 0.00208560929585858, -0.139040619723905, -0.108650312841394),
-                  20653.0), (
-                  np.quaternion(0.980434998510279, -0.00546231006058201, -0.155924123547522, -0.0778627470453868),
-                  20654.0), (
-                  np.quaternion(0.984109643460125, -0.0070513457145695, -0.166550799483563, -0.0484655874466183),
-                  20655.0), (
-                  np.quaternion(0.974476114807826, -0.010030787565796, -0.190684278478498, 0.0114211937630351),
-                  20654.0), (
-                  np.quaternion(0.976661038832059, -0.00427053332009136, -0.190287019565001, 0.0453868308670176),
-                  20653.0), (
-                  np.quaternion(0.97715761247393, -0.00814380772668588, -0.17777336378985, 0.0868010725990664),
-                  20655.0), (
-                  np.quaternion(0.981428145794021, -0.0225444433409475, -0.164266560730956, 0.100506505114709),
-                  20653.0), (
-                  np.quaternion(0.978349389214421, -0.0384347998808224, -0.146191280166849, 0.103188002780812),
-                  20653.0), (
-                  np.quaternion(0.987784288409971, -0.0766709703048963, -0.101201708213328, 0.102691429138941),
-                  20655.0), (
-                  np.quaternion(0.989472638792333, -0.086602443142318, -0.0768695997616447, 0.103982520607806),
-                  20653.0), (
-                  np.quaternion(0.983811699275002, -0.0980236369053531, -0.0479690138047473, 0.0942496772271328),
-                  20654.0), (
-                  np.quaternion(0.995928096136657, -0.105472241533419, 0.006852716257821, 0.0648525176283643), 20655.0),
-                  (
-                  np.quaternion(0.990565100804449, -0.113516734531731, 0.029595789055517, 0.0429039626576622), 20653.0),
-                  (np.quaternion(0.991160989174695, -0.121660542258417, 0.0704141424173205, -0.0205581487734631),
-                   20655.0), (
-                  np.quaternion(0.986393882212732, -0.122951633727282, 0.0808421888966133, -0.0669381269242229),
-                  20654.0), (
-                  np.quaternion(0.983017181448009, -0.117985897308571, 0.0853113516734531, -0.10855099811302), 20654.0),
-                  (np.quaternion(0.969510378389115, -0.107458536100904, 0.0698182540470751, -0.179461714172212),
-                   20655.0), (
-                  np.quaternion(0.964147383056907, -0.0959380276094945, 0.0561128215314331, -0.210149965239845),
-                  20653.0), (
-                  np.quaternion(0.964743271427153, -0.0891846260800477, 0.0437977952130301, -0.234581388419903),
-                  20654.0), (
-                  np.quaternion(0.967623398550005, -0.0707120866024432, -0.00963352865229915, -0.243122455060085),
-                  20655.0), (
-                  np.quaternion(0.96255834740292, -0.0604826695798987, -0.0461813486940114, -0.238256033369749),
-                  20653.0), (
-                  np.quaternion(0.969907637302612, -0.0440957393981528, -0.103883205879432, -0.188201410269143),
-                  20653.0), (
-                  np.quaternion(0.977852815572549, -0.0405204091766809, -0.137451584069918, -0.153838514251664),
-                  20655.0), (
-                  np.quaternion(0.973284338067335, -0.034164266560731, -0.161485748336478, -0.107557850829278),
-                  20653.0), (
-                  np.quaternion(0.978150759757672, -0.0511470851127222, -0.193663720329725, -0.0227430727976959),
-                  20653.0), (
-                  np.quaternion(0.975568576819942, -0.0513457145694707, -0.199523289303804, 0.0126129705035257),
-                  20654.0), (
-                  np.quaternion(0.971595987684974, -0.0578011719137949, -0.19942397457543, 0.0432019068427848),
-                  20653.0), (
-                  np.quaternion(0.97527063263482, -0.0789552090575033, -0.173602145198133, 0.0813387625384845),
-                  20654.0), (
-                  np.quaternion(0.978051445029298, -0.0860065547720728, -0.149071407289701, 0.0996126725593406),
-                  20655.0), (
-                  np.quaternion(0.978647333399543, -0.118383156222068, -0.0884894229814282, 0.0926606415731453),
-                  20653.0), (
-                  np.quaternion(0.983712384546628, -0.128612573244612, -0.051941602939716, 0.0877942198828086),
-                  20653.0), (
-                  np.quaternion(0.981328831065647, -0.126725593405502, -0.00576025424570462, 0.0812394478101102),
-                  20655.0), (
-                  np.quaternion(0.984904161287119, -0.124937928294766, 0.0584963750124144, 0.0331711192769888),
-                  20653.0), (
-                  np.quaternion(0.978349389214421, -0.122256430628662, 0.0861058695004469, 0.00357533022147188),
-                  20653.0), (
-                  np.quaternion(0.984308272916874, -0.122355745357037, 0.104181150064555, -0.0379382262389512),
-                  20655.0),
-                  (np.quaternion(0.971099414043103, -0.128016684874367, 0.118979044592313, -0.11232495779124), 20653.0),
-                  (
-                  np.quaternion(0.962955606316417, -0.129009832158109, 0.117191379481577, -0.152547422782799), 20653.0),
-                  (
-                  np.quaternion(0.955606316416725, -0.106266759360413, 0.101996226040322, -0.220081438077267), 20655.0),
-                  (np.quaternion(0.95620220478697, -0.0995133578309664, 0.0896811997219187, -0.244512861257324),
-                   20654.0), (
-                  np.quaternion(0.953421392392492, -0.0924620121163969, 0.065150461813487, -0.262786771278181),
-                  20655.0), (
-                  np.quaternion(0.953719336577614, -0.0695203098619526, 0.0225444433409474, -0.283742178965141),
-                  20654.0), (
-                  np.quaternion(0.954613169132982, -0.0640579998013706, -0.0126129705035256, -0.272618929387228),
-                  20654.0), (
-                  np.quaternion(0.954116595491111, -0.0648525176283644, -0.0418115006455458, -0.266262786771278),
-                  20655.0), (
-                  np.quaternion(0.967524083821631, -0.0668388121958487, -0.103188002780812, -0.219286920250273),
-                  20654.0), (
-                  np.quaternion(0.967822028006754, -0.0681299036647135, -0.126030390306883, -0.183732247492303),
-                  20653.0), (
-                  np.quaternion(0.972986393882213, -0.0817360214519813, -0.164365875459331, -0.11113318105075),
-                  20655.0), (
-                  np.quaternion(0.971595987684974, -0.0926606415731454, -0.175091866123746, -0.0681299036647134),
-                  20653.0), (
-                  np.quaternion(0.970205581487735, -0.103585261694309, -0.185817856788162, -0.0251266262786771),
-                  20653.0), (
-                  np.quaternion(0.976065150461814, -0.118979044592313, -0.159598768497368, 0.0469758665210051),
-                  20655.0), (
-                  np.quaternion(0.973979541165955, -0.118383156222068, -0.136259807329427, 0.0759757672062767),
-                  20653.0), (
-                  np.quaternion(0.981527460522395, -0.119475618234184, -0.105472241533419, 0.0928592710298937),
-                  20653.0), (
-                  np.quaternion(0.986493196941106, -0.135663918959182, -0.0274108650312841, 0.106068129903665),
-                  20655.0), (
-                  np.quaternion(0.985599364385738, -0.141126229019764, 0.00774654881318902, 0.0949448803257523),
-                  20653.0), (
-                  np.quaternion(0.984109643460125, -0.148674148376204, 0.0719038633429338, 0.0604826695798987),
-                  20653.0),
-                  (np.quaternion(0.977554871387427, -0.1459926507101, 0.0995133578309663, 0.0308868805243818), 20655.0),
-                  (np.quaternion(0.972489820240342, -0.150660442943689, 0.116098917469461, -0.00327738603634914),
-                   20653.0), (
-                  np.quaternion(0.970006952030986, -0.155129605720528, 0.138544046082034, -0.0727976958983017),
-                  20653.0), (
-                  np.quaternion(0.966630251266263, -0.150163869301817, 0.143013208858874, -0.114410567087099), 20656.0),
-                  (
-                  np.quaternion(0.963253550501539, -0.145198132883107, 0.147482371635714, -0.156023438275896), 20654.0),
-                  (np.quaternion(0.95739398152746, -0.129804349985103, 0.12126328334492, -0.228125931075578), 20653.0),
-                  (np.quaternion(0.951832356738504, -0.135266660045685, 0.108650312841394, -0.25593405502036), 20656.0),
-                  (
-                  np.quaternion(0.938921442049856, -0.122653689542159, 0.0641573145297447, -0.30350580991161), 20654.0),
-                  (np.quaternion(0.942099513357831, -0.120369450789552, 0.041016982818552, -0.31552289204489), 20653.0),
-                  (np.quaternion(0.935644056013507, -0.116396861654583, 0.0104280464792928, -0.315423577316516),
-                   20656.0), (
-                  np.quaternion(0.941106366074089, -0.102393484953819, -0.0538285827788261, -0.311550302909922),
-                  20653.0), (
-                  np.quaternion(0.940609792432218, -0.103188002780812, -0.0830271129208462, -0.305194160293972),
-                  20656.0), (
-                  np.quaternion(0.941205680802463, -0.101102393484954, -0.112027013606118, -0.28185519912603), 20653.0),
-                  (
-                  np.quaternion(0.944185122653689, -0.120468765517926, -0.150759757672063, -0.24322176978846), 20654.0),
-                  (np.quaternion(0.949349488529149, -0.129407091071606, -0.172410368457642, -0.218393087694905),
-                   20655.0),
-                  (np.quaternion(0.94795908233191, -0.14033171119277, -0.183136359122058, -0.175389810308869), 20653.0),
-                  (np.quaternion(0.955010428046479, -0.14221869103188, -0.18154732346807, -0.152150163869302), 20653.0),
-                  (np.quaternion(0.96067136756381, -0.150362498758566, -0.17399940411163, -0.133677624391697), 20655.0),
-                  (np.quaternion(0.964246697785281, -0.157910418115006, -0.143112523587248, -0.0862051842288211),
-                   20653.0), (
-                  np.quaternion(0.979441851226537, -0.154136458436786, -0.123050948455656, -0.0705134571456947),
-                  20653.0), (
-                  np.quaternion(0.981030886880524, -0.15046181348694, -0.0936537888568875, -0.0598867812096534),
-                  20655.0), (
-                  np.quaternion(0.984407587645248, -0.126129705035257, -0.0359519316714669, -0.0415135564604231),
-                  20654.0), (
-                  np.quaternion(0.992452080643559, -0.106862647730659, -0.0124143410467773, -0.0397258913496872),
-                  20653.0), (
-                  np.quaternion(0.985003476015493, -0.0947462508690039, -0.00278081239447813, -0.0414142417320489),
-                  20655.0), (
-                  np.quaternion(0.993147283742179, -0.0890853113516735, 0.0156917270831264, -0.0489621610884894),
-                  20652.0), (
-                  np.quaternion(0.99175687754494, -0.0953421392392492, 0.0216506107855795, -0.0537292680504519),
-                  20654.0), (
-                  np.quaternion(0.991657562816566, -0.0817360214519814, 0.0267156619326646, -0.0443936835832754),
-                  20655.0), (
-                  np.quaternion(0.996424669778528, -0.0757771377495283, 0.0329724898202403, -0.0457840897805145),
-                  20653.0), (
-                  np.quaternion(0.990167841890953, -0.0743867315522892, 0.0377395967822028, -0.0398252060780614),
-                  20654.0), (
-                  np.quaternion(0.994934948852915, -0.0684278478498362, 0.0439964246697785, -0.0412156122753005),
-                  20655.0), (
-                  np.quaternion(0.988678120965339, -0.0670374416525972, 0.048763531631741, -0.0352567285728474),
-                  20652.0)]
