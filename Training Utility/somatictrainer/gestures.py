@@ -2,7 +2,6 @@ import json
 import logging
 from typing import List, Tuple, Any
 import numpy as np
-import quaternion
 
 standard_gesture_time = 1000  # Milliseconds
 sampling_rate = 10  # Milliseconds
@@ -39,6 +38,9 @@ class Gesture:
             'a': self.accelerations.tolist()
         }
         return datastore
+
+    def to_training_data(self):
+        return np.array([list(b) + list(a) for b, a in zip(self.bearings, self.accelerations)])
 
     @staticmethod
     def from_dict(datastore):
@@ -123,8 +125,7 @@ class GestureTrainingSet:
         labels = []
 
         for example in self.examples:
-            input = [[q.w, q.x, q.y, q.z] for q in example.normalized_data]
-            data.append(input)
+            data.append(example.to_training_data())
             labels.append(ord(example.glyph) - ord('a'))
 
         return np.array(data), np.array(labels)
