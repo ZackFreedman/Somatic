@@ -576,6 +576,8 @@ class SomaticTrainerHomeWindow(Frame):
         else:
             frequency = 1 / (microseconds / 1000000)
 
+        bearing = np.array([bearing[0], bearing[1]])  # We don't care about roll
+
         if self.bearing_zero is not None:
             # Constrain gesture to a cone
             gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
@@ -591,11 +593,11 @@ class SomaticTrainerHomeWindow(Frame):
             bearing += 0.5
 
         if self.last_bearing_received is not None:
-            y, p, r = bearing_delta(self.last_bearing_received, bearing)
+            y, p = bearing_delta(self.last_bearing_received, bearing)
             norm = np.sqrt(sum(np.square([abs(y), abs(p)])))
 
             logging.debug(
-                'Last: {} Counter: {} Delta: {}'.format(self.last_bearing_received, bearing, [y, p, r]))
+                'Last: {} Counter: {} Delta: {}'.format(self.last_bearing_received, bearing, [y, p]))
             logging.debug('Norm: {}'.format(norm))
 
             if norm:
@@ -635,7 +637,7 @@ class SomaticTrainerHomeWindow(Frame):
                 for accel, time in self.starting_velocity_estimation_buffer:
                     self.gesture_hand_velocity += (accel - 0.5) * time / 1000000 * motion_scale
 
-                bearing = np.array([0.5, 0.5, 0.5])
+                bearing = np.array([0.5, 0.5])
 
                 self.gesture_buffer.append((bearing, local_acceleration, 0))
 
@@ -753,10 +755,10 @@ class SomaticTrainerHomeWindow(Frame):
         def finger(value):
             return '.' if value else '|'
 
-        text = 'Received {0}{1}{2}{3}_, ({4:.2f},{5:.2f},{6:.2f}, ({7:.2f}, {8:.2f}, {9:.2f}) at {10}Hz' \
+        text = 'Received {0}{1}{2}{3}_, ({4:.2f},{5:.2f}), ({6:.2f}, {7:.2f}, {8:.2f}) at {9}Hz' \
             .format(finger(fingers[0]), finger(fingers[1]),
                     finger(fingers[2]), finger(fingers[3]),
-                    bearing[0], bearing[1], bearing[2],
+                    bearing[0], bearing[1],
                     accelerometer[0], accelerometer[1], accelerometer[2],
                     round(frequency))
 

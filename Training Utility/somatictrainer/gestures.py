@@ -23,7 +23,7 @@ class Gesture:
 
         expected_count = round(standard_gesture_time / sampling_rate)
 
-        if len(bearings) != expected_count or accelerations.shape != (expected_count, 3):
+        if bearings.shape != (expected_count, 2) or accelerations.shape != (expected_count, 3):
             raise AttributeError('Data invalid - got {} orientations and {} acceleration data shape instead of {}'
                                  .format(len(bearings), accelerations.shape, expected_count))
 

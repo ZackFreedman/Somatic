@@ -5,7 +5,7 @@ import numpy as np
 import quaternion
 from scipy.interpolate import interp1d
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 def lookRotation(forward, up):
@@ -81,6 +81,15 @@ def lookRotation(forward, up):
     return output
 
 
+def custom_interpolate(value, in_min, in_max, out_min, out_max, clamp=False):
+    interpolated = (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+
+    if clamp:
+        return np.clip(interpolated, out_min, out_max)
+    else:
+        return interpolated
+
+
 def custom_euler(q):
     # h = np.arctan2(np.square(q.x) - np.square(q.y) - np.square(q.z) + np.square(q.w), 2 * (q.x * q.y + q.z * q.w))
     # h = np.arctan2(2 * (q.x * q.y + q.z * q.w), np.square(q.x) - np.square(q.y) - np.square(q.z) + np.square(q.w))
@@ -128,82 +137,120 @@ def process_samples(samples: List[Tuple[np.array, np.array, int]], standard_gest
     raw_accel = np.vstack([x[1] for x in samples])
     timestamps = np.array([x[2] for x in samples])
 
+    # Remap standardized bearings so gestures are the same size
+    yaw_min = min(bearings[:, 0])
+    yaw_max = max(bearings[:, 0])
+
+    pitch_min = min(bearings[:, 1])
+    pitch_max = max(bearings[:, 1])
+
+    magnitude = np.linalg.norm([yaw_max - yaw_min, pitch_max - pitch_min])
+    fudge_factor = 1 / 20
+
+    early_crap_count = 0
+
+    for i in range(1, len(bearings)):
+        if np.linalg.norm([bearings[i, 0] - bearings[0, 0],
+                           bearings[i, 1] - bearings[0, 1]]) > magnitude * fudge_factor:
+            break
+        else:
+            early_crap_count += 1
+
+    start_point = bearings[0]
+
+    trimmed = bearings[early_crap_count:].tolist()
+
+    bearings = np.array([start_point] + trimmed)
+
+    logging.debug('Early crap stripped: {}'.format(bearings))
+
+    late_crap_count = 0
+
+    for i in range(len(bearings)):
+        if np.linalg.norm([bearings[-i, 0] - bearings[- 1, 0],
+                           bearings[-i, 1] - bearings[- 1, 1]]) > magnitude * fudge_factor:
+            break
+        else:
+            late_crap_count += 1
+
+    if late_crap_count:
+        endpoint = bearings[-1]
+        trimmed = bearings[:-late_crap_count].tolist()
+        bearings = trimmed + [endpoint]
+
+    logging.debug('Late crap stripped: {}'.format(bearings))
+
     if not sum(timestamps):
         raise AttributeError('Gesture has no duration')
+
+    target_sample_count = int(np.ceil(standard_gesture_time / sampling_rate))
 
     scaling_factor = standard_gesture_time / timestamps[-1]
     # Standardize times by interpolating
     scaled_times = timestamps * scaling_factor
 
-    bearing_model = interp1d(scaled_times, bearings, axis=0, kind='cubic', fill_value='extrapolate')
     accel_model = interp1d(scaled_times, raw_accel, axis=0, kind='cubic', fill_value='extrapolate')
-
-    standardized_bearings = bearing_model(np.linspace(0, standard_gesture_time,
-                                                      num=int(np.ceil(standard_gesture_time / sampling_rate)),
-                                                      endpoint=True))
 
     standardized_accel = accel_model(np.linspace(0, standard_gesture_time,
                                                  num=int(np.ceil(standard_gesture_time / sampling_rate)),
                                                  endpoint=True))
 
-    #
-    # orientations = []
-    # accelerations = []
-    #
-    # # Interpolate to increase/reduce number of samples to required sampling rate
-    # for earliest_time in range(0, standard_gesture_time, sampling_rate):
-    #     # For each sample required, find the latest sample before this time, and the earliest sample
-    #     # after this time, and slerp them.
-    #
-    #     # TODO This can probably be done directly by numpy, figger it out
-    #
-    #     early_orientation = None
-    #     early_acceleration = None
-    #     early_time = None
-    #     late_orientation = None
-    #     late_acceleration = None
-    #     late_time = None
-    #
-    #     latest_time = earliest_time + sampling_rate
-    #
-    #     sample_time = 0
-    #     for index in range(len(timedeltas)):
-    #         if index:
-    #             sample_time += scaled_times[index]
-    #
-    #         if early_orientation is None and sample_time >= earliest_time:
-    #             # This sample is the latest sample that began earlier than the early time.
-    #             early_orientation = quats[index]
-    #             early_acceleration = raw_accel[index]
-    #             early_time = sample_time - scaled_times[index]
-    #
-    #         if late_orientation is None and (sample_time > latest_time or np.isclose(sample_time, latest_time)):
-    #             # This sample is the latest sample that began earlier than the late time.
-    #             late_orientation = quats[index]
-    #             late_acceleration = raw_accel[index]
-    #             late_time = sample_time
-    #
-    #         if early_orientation is not None and late_orientation is not None \
-    #                 and early_acceleration is not None and late_acceleration is not None:
-    #             break
-    #
-    #     if early_orientation is None or early_acceleration is None \
-    #             or late_orientation is None or late_acceleration is None:
-    #         raise AttributeError('Something went wrong - missing data {0} and {1}. Got {2}/{4} and {3}/{5}'
-    #                              .format(earliest_time, latest_time,
-    #                                      early_orientation, late_orientation,
-    #                                      early_acceleration, late_acceleration))
-    #
-    #     # amount = (earliest_time - early_time) / (late_time - early_time)  # Just the Arduino map function
-    #
-    #     orientations.append(quaternion.quaternion_time_series.slerp(
-    #         early_orientation, late_orientation, early_time, late_time, earliest_time))
-    #
-    #     # accelerations.append(np.interp(amount, [0, 1], [early_acceleration, late_acceleration]))
-    #     linear_fit = interp1d([early_time, late_time], np.vstack([early_acceleration, late_acceleration]), axis=0)
-    #     accelerations.append(linear_fit(earliest_time))
-    #
-    # bearings = np.array([custom_euler(q)[:2] for q in orientations])
+    # Standardize bearings 'curve' to evenly-spaced points
+    segment_lengths = [np.linalg.norm([bearings[i, 0] - bearings[i - 1, 0], bearings[i, 1] - bearings[i - 1, 1]])
+                       for i in range(1, len(bearings))]
+
+    curve_length = sum(segment_lengths)
+
+    target_segment_length = curve_length / (target_sample_count - 1)
+
+    standardized_bearings = [bearings[0]]
+
+    logging.debug(
+        'Segment lengths: {} - {} segments, {} points'.format(segment_lengths, len(segment_lengths), len(bearings)))
+    logging.debug('Total length: {:.2f} Target segment length: {:.4f}'.format(curve_length, target_segment_length))
+
+    for i in range(1, target_sample_count):
+        lower_length = 0
+        higher_length = 0
+        first_longer_sample = 0
+
+        logging.debug('Looking to place a point at {:.3f} units along curve'.format(i * target_segment_length))
+
+        while higher_length < i * target_segment_length \
+                and not np.isclose(higher_length, i * target_segment_length) \
+                and not np.isclose(higher_length, curve_length):
+            lower_length = higher_length
+
+            higher_length = higher_length + segment_lengths[first_longer_sample]
+            first_longer_sample += 1
+
+            logging.debug(
+                'Is {:.3f} enough? If so, {} is the next longest'.format(higher_length, first_longer_sample))
+
+        logging.debug('There we go')
+
+        low_point = bearings[first_longer_sample - 1]
+        high_point = bearings[first_longer_sample]
+
+        standardized_point = [custom_interpolate(i * target_segment_length, lower_length, higher_length,
+                                                 low_point[0],
+                                                 high_point[0]),
+                              custom_interpolate(i * target_segment_length, lower_length, higher_length,
+                                                 low_point[1],
+                                                 high_point[1])]
+
+        logging.debug('Placed point {:.3f} units ({:.0f}%) along the {:.3f} line between {} and {} ==> {}'
+                      .format(i * target_segment_length - lower_length,
+                              (i * target_segment_length - lower_length) / (higher_length - lower_length) * 100,
+                              higher_length - lower_length, low_point, high_point, standardized_point))
+
+        standardized_bearings.append(standardized_point)
+
+    logging.debug('Done scaling')
+
+    standardized_bearings = np.array([[custom_interpolate(y, yaw_min, yaw_max, 0, 1),
+                                       custom_interpolate(p, pitch_min, pitch_max, 0, 1)]
+                                      for y, p in standardized_bearings])
 
     return standardized_bearings, standardized_accel
 
@@ -221,5 +268,4 @@ def wrapped_delta(old, new):
 
 def bearing_delta(old, new):
     return np.array([wrapped_delta(old[0], new[0]),
-                     wrapped_delta(old[1], new[1]),
-                     wrapped_delta(old[2], new[2])])
+                     wrapped_delta(old[1], new[1])])
