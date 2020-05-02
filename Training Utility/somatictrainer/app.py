@@ -70,6 +70,8 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.open_file_pathspec = ''
         self.open_file_has_been_modified = False
+        self.change_count_since_last_save = 0
+        self.autosave_change_threshold = 25
         self.training_set = GestureTrainingSet()
 
         self.gesture_buffer = []
@@ -226,9 +228,20 @@ class SomaticTrainerHomeWindow(Frame):
             def delete_on_right_click(g, i):
                 logging.info('Removing glyph {} #{}'.format(g, i))
                 self.training_set.remove_at(g, i)
+
                 self.reload_example_list()
                 self.reload_glyph_picker()
+
+                # We can save now! Yay!
                 self.open_file_has_been_modified = True
+                self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
+                self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
+
+                if self.open_file_pathspec:
+                    self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
+                    if self.change_count_since_last_save >= self.autosave_change_threshold:
+                        self.save_file()
+                        self.change_count_since_last_save = 0
 
             # Right click on OSX
             button.bind('<Button-2>', lambda event, g=selected_glyph, i=index: delete_on_right_click(g, i))
@@ -323,11 +336,15 @@ class SomaticTrainerHomeWindow(Frame):
             filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
         if new_file_pathspec:
             new_file_pathspec += '.json'
-            self.training_set = GestureTrainingSet()
             self.open_file_pathspec = new_file_pathspec
+            open(new_file_pathspec, 'w')  # Save empty file
+
+            self.training_set = GestureTrainingSet()
+
             self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
             self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
             self.file_name_label.configure(text=self.open_file_pathspec, anchor=E)
+
             self.open_file_has_been_modified = True
             self.reload_glyph_picker()
 
@@ -370,6 +387,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.training_set.save(self.open_file_pathspec)
 
         self.open_file_has_been_modified = False
+        self.change_count_since_last_save = 0
 
     def save_as(self):
         if self.state is self.State.recording:
@@ -664,7 +682,16 @@ class SomaticTrainerHomeWindow(Frame):
                             self.path_display.configure(bg='pale green')
                             self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
 
+                            # We can save now! Yay!
                             self.open_file_has_been_modified = True
+                            self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
+                            self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
+
+                            if self.open_file_pathspec:
+                                self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
+                                if self.change_count_since_last_save >= self.autosave_change_threshold:
+                                    self.save_file()
+                                    self.change_count_since_last_save = 0
 
                             self.reload_glyph_picker()
                             self.reload_example_list()
