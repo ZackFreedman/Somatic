@@ -544,8 +544,8 @@ class SomaticTrainerHomeWindow(Frame):
         logging.debug('Acceleration from gravity: {}'.format(acceleration))
 
         acceleration[0] -= 0.005  # I think this is introduced by rounding/precision error
-        acceleration[1] -= 0.005
-        acceleration[2] -= 0.98  # Get outta here gravity
+        acceleration[1] -= 0.025
+        acceleration[2] -= 0.99  # Get outta here gravity
 
         deadzone = 0
         if abs(acceleration[0] - .5) <= deadzone:
@@ -777,9 +777,12 @@ class SomaticTrainerHomeWindow(Frame):
 
         last_point = None
 
-        for i, coords in enumerate(_path_to_line_points(path, 250, 250, 5, 5)):
-            x_coord = coords[0]
-            y_coord = coords[1]
+        x_center = (max(path[:, 0] - min(path[:, 0]))) / 2
+        y_center = (max(path[:, 1] - min(path[:, 1]))) / 2
+
+        for i, coords in enumerate(path):
+            x_coord = (coords[0] + 0.5 - x_center) * 240
+            y_coord = (coords[1] + 0.5 - y_center) * 240
 
             # logging.debug('Plotting ({}, {}) - scaled to ({}, {})'.format(x, y, x_coord, y_coord))
 
@@ -798,26 +801,26 @@ class SomaticTrainerHomeWindow(Frame):
             self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2), fill='SeaGreen1')
 
 
-def _path_to_line_points(path, height, width, xpad=0, ypad=0):
-    dots = []
-
-    for bearing in path:
-        x_coord = np.tan(bearing[0])  # * 120 + 122
-        y_coord = np.tan(bearing[1])  # * -120 + 122
-        dots.append([x_coord, y_coord])
-
-    min_x = min([coord[0] for coord in dots])
-    max_x = max([coord[0] for coord in dots])
-    min_y = min([coord[1] for coord in dots])
-    max_y = max([coord[1] for coord in dots])
-
-    output = []
-
-    for x, y in dots:
-        output.append((_scale(x, min_x, max_x, xpad, width - xpad * 2),
-                       _scale(y, min_y, max_y, ypad, height - ypad * 2)))
-
-    return output
+# def _path_to_line_points(path, height, width, xpad=0, ypad=0):
+#     dots = []
+#
+#     for bearing in path:
+#         x_coord = np.tan(bearing[0])  # * 120 + 122
+#         y_coord = np.tan(bearing[1])  # * -120 + 122
+#         dots.append([x_coord, y_coord])
+#
+#     min_x = min([coord[0] for coord in dots])
+#     max_x = max([coord[0] for coord in dots])
+#     min_y = min([coord[1] for coord in dots])
+#     max_y = max([coord[1] for coord in dots])
+#
+#     output = []
+#
+#     for x, y in dots:
+#         output.append((_scale(x, min_x, max_x, xpad, width - xpad * 2),
+#                        _scale(y, min_y, max_y, ypad, height - ypad * 2)))
+#
+#     return output
 
 
 def _scale(x, in_min, in_max, out_min, out_max):
@@ -828,13 +831,19 @@ def _gesture_to_image(path, height, width, line_thiccness, xpad=0, ypad=0):
     img = Image.new('RGBA', (height, width), (255, 255, 255, 255))
     drawing = ImageDraw.Draw(img)
 
-    scaled_joints = _path_to_line_points(path, height, width, xpad, ypad)
+    x_center = (max(path[:, 0] - min(path[:, 0]))) / 2
+    y_center = (max(path[:, 1] - min(path[:, 1]))) / 2
 
-    for i, j in enumerate(scaled_joints):
+    for i, coords in enumerate(path):
         if i > 0:
-            green = int(_scale(i, 0, len(scaled_joints), 255, 0))
-            blue = int(_scale(i, 0, len(scaled_joints), 0, 255))
-            drawing.line([scaled_joints[i - 1], j],
+            prev_x_coord = (path[i - 1][0] + 0.5 - x_center) * (width - xpad * 2)
+            prev_y_coord = (path[i - 1][1] + 0.5 - y_center) * (height - ypad * 2)
+            x_coord = (coords[0] + 0.5 - x_center) * (width - xpad * 2)
+            y_coord = (coords[1] + 0.5 - y_center) * (height - ypad * 2)
+
+            green = int(_scale(i, 0, len(path), 255, 0))
+            blue = int(_scale(i, 0, len(path), 0, 255))
+            drawing.line(((prev_x_coord, prev_y_coord), (x_coord, y_coord)),
                          fill=(0, green, blue, 255),
                          width=line_thiccness)
 
