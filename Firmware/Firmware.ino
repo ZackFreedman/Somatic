@@ -36,11 +36,15 @@ const byte fingerSwitchPins[] = {9, 10, 11, 12};
 bool lastFingerPositions[4];
 unsigned long lastFingerStableTimestamps[4];
 
-float lastOrientation[4];
+float lastBearing[3];
 
-const float angularVelocityWindow = 5.0;
-const int historyLength = int(angularVelocityWindow);
-float angularVelocityHistory[historyLength];
+const float velocityThresholdToBegin = 2. / 1000000.;  // In rad/microsecond
+const float velocityThresholdToEnd = 0.5 / 1000000.;  // Also in rad/microsecond
+const int historyLength = 5;
+float angularVelocityWindow[historyLength];
+float bearingAtLastBuzz[2];
+
+bool isGesturing;
 
 elapsedMillis timeSinceLastGesture;
 unsigned long lastTimestamp;
@@ -77,25 +81,11 @@ void setup() {
   }
 
   lastTimestamp = micros();
-
 }
 
 void loop() {
   unsigned long timestamp = micros();
-
-  //  bool debugKnobDown = false;
-  //
-  //  Wire.beginTransmission(0x24);
-  //  Wire.write(0x00);                // go to the input port register
-  //  Wire.endTransmission();
-  //  Wire.requestFrom(0x24, 1);     // start read mode
-  //  if (Wire.available()) {
-  //    byte buttonStates = Wire.read();  // fetch one byte
-  //    Wire.endTransmission();
-  //    Serial.println(buttonStates);
-  //    if (buttonStates & 0b00000001)
-  //      debugKnobDown = true;
-  //  }
+  float sampleRate = timestamp - lastTimestamp;
 
   if (bt.available() >= 5) {
     for (int i = 0; i < bt.available(); i++) {
@@ -114,27 +104,22 @@ void loop() {
   if (imu.poll() & 0x04) {  // Only send data when we have new AHRS
     float theta = 0;
 
-    if (lastOrientation[0] != 0 || lastOrientation[1] != 0 || lastOrientation[2] != 0 || lastOrientation[3] != 0) {
-      // These quats are [x, y, z, w] not [w, x, y, z]
-      float inverse[] = {imu.Quat[0] * -1, imu.Quat[1] * -1, imu.Quat[2] * -1, imu.Quat[3]};
-      float delta[] = {0, 0, 0, 0};
+    float headingDelta = wrappedDelta(lastBearing[0], imu.Quat[0]);
+    float pitchDelta = wrappedDelta(lastBearing[1],imu.Quat[1]);
 
-      quaternionMultiply(lastOrientation, inverse, delta);
+    float norm = sqrt(headingDelta * headingDelta + pitchDelta * pitchDelta);
+    theta = asin(norm);
+    float angularVelocity = theta / sampleRate;
+    debug_print("Theta: ");
+    debug_println(theta);
+    debug_print("Angular velocity (per sec): ");
+    debug_println(angularVelocity * 1000000.);
 
-      float norm = sqrt(delta[0] * delta[0] + delta[1] * delta[1]);
-      theta = asin(norm) * 2;
-      //    debug_println(theta);
-
-      for (int i = angularVelocityWindow - 2; i >= 0; i--) {
-        angularVelocityHistory[i + 1] = angularVelocityHistory[i];
-      }
-
-      angularVelocityHistory[0] = theta;
+    for (int i = historyLength - 2; i >= 0; i--) {
+      angularVelocityWindow[i + 1] = angularVelocityWindow[i];
     }
 
-    for (int i = 0; i < 4; i++) {
-      lastOrientation[i] = imu.Quat[i];
-    }
+    angularVelocityWindow[0] = angularVelocity;
 
     //  Serial.println(imu.algorithmStatus, BIN);
 
@@ -157,21 +142,32 @@ void loop() {
       bt.print(',');
     }
 
-    float averageVelocity = 0;
+    //    float averageVelocity = 0;
     bool handIsMoving = false;
-    for (int i = 0; i < angularVelocityWindow; i++) {
-      averageVelocity += angularVelocityHistory[i];
-      if (angularVelocityHistory[i] > 0.05) {
+    //    for (int i = 0; i < velocityThreshold; i++) {
+    //      averageVelocity += angularVelocityWindow[i];
+    //      if (angularVelocityWindow[i] > 0.05) {
+    //        handIsMoving = true;
+    //      }
+    //    }
+    //    averageVelocity /= velocityThreshold;
+
+    for (int i = 0; i < historyLength; i++) {
+      if ((isGesturing && angularVelocityWindow[i] >= velocityThresholdToEnd)
+          || (!isGesturing && angularVelocityWindow[i] >= velocityThresholdToBegin)) {
         handIsMoving = true;
+        break;
       }
     }
-    averageVelocity /= angularVelocityWindow;
 
-    if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
-      if (handIsMoving) analogWrite(vibePin, 75);
-      else analogWrite(vibePin, 0);
+    if (handIsMoving) {
+      if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
+        isGesturing = true;
+        analogWrite(vibePin, 75);
+      }
     }
-    else if (!handIsMoving) {
+    else {
+      isGesturing = false;
       analogWrite(vibePin, 0);
     }
 
@@ -186,13 +182,13 @@ void loop() {
     //  else
     //    bt.print(imu.Quat[0] + 2 * PI);
 
-    bt.print(imu.Quat[0] * -1);
+    bt.print(imu.Quat[0] * -1, 4);
     bt.print(',');
 
-    bt.print(imu.Quat[1]);
+    bt.print(imu.Quat[1], 4);
     bt.print(',');
 
-    bt.print(imu.Quat[2]);
+    bt.print(imu.Quat[2], 4);
     bt.print(',');
 
     bt.print(imu.ax, 4);
@@ -205,7 +201,7 @@ void loop() {
     bt.print(',');
 
     // Not sure if this is where the delta should be calculated
-    bt.println(timestamp - lastTimestamp);
+    bt.println(sampleRate);
     //  bt.print(imu.Quat[0] * 180 / PI);
     //  bt.print(',');
     //  bt.print(imu.Quat[1] * 180 / PI);
@@ -214,6 +210,9 @@ void loop() {
     //  bt.println();
 
     lastTimestamp = timestamp;
+    lastBearing[0] = imu.Quat[0];
+    lastBearing[1] = imu.Quat[1];
+    lastBearing[2] = imu.Quat[2];
   }
 }
 
@@ -234,3 +233,15 @@ void quaternionMultiply(float* q1, float* q2, float* out) {
 //    if (bt.read() == 'O')
 //  }
 //}
+
+float wrappedDelta(float oldValue, float newValue) {
+  float delta = oldValue - newValue;
+
+  if (delta > PI)
+    delta -= 2 * PI;
+  else if (delta < -PI)
+    delta += 2 * PI;
+
+  return delta;
+}
+

@@ -79,7 +79,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.current_gesture_duration = 0
 
         self.bearing_zero = None
-        self.last_bearing_received = None
+        self.last_unprocessed_bearing_received = None
         self.angular_velocity_window = deque(maxlen=5)
         self.starting_velocity_estimation_buffer = deque(maxlen=10)
         self.last_coordinate_visualized = None
@@ -552,24 +552,12 @@ class SomaticTrainerHomeWindow(Frame):
 
         bearing = np.array([bearing[0], bearing[1]])  # We don't care about roll
 
-        if self.bearing_zero is not None:
-            # Constrain gesture to a cone
-            gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
-
-            bearing = np.clip(bearing_delta(self.bearing_zero, bearing),
-                              -1 / 2 * gesture_cone_angle,
-                              1 / 2 * gesture_cone_angle)
-
-            # Scale bearings to ML-ready 0.0-1.0 values
-            bearing /= gesture_cone_angle
-            bearing += 0.5
-
-        if self.last_bearing_received is not None:
-            y, p = bearing_delta(self.last_bearing_received, bearing)
+        if self.last_unprocessed_bearing_received is not None:
+            y, p = bearing_delta(self.last_unprocessed_bearing_received, bearing)
             norm = np.sqrt(sum(np.square([abs(y), abs(p)])))
 
             logging.debug(
-                'Last: {} Counter: {} Delta: {}'.format(self.last_bearing_received, bearing, [y, p]))
+                'Last: {} Counter: {} Delta: {}'.format(self.last_unprocessed_bearing_received, bearing, [y, p]))
             logging.debug('Norm: {}'.format(norm))
 
             if norm:
@@ -584,12 +572,24 @@ class SomaticTrainerHomeWindow(Frame):
             in_degrees = angular_velocity * 180 / np.pi
             logging.debug('Angular velocity {0:.2f} deg or {1:.2f} rad/s'.format(in_degrees, angular_velocity))
 
-        self.last_bearing_received = bearing
+        self.last_unprocessed_bearing_received = bearing
 
         velocity_threshold = .5 if self.state is self.State.recording else 2
 
         gesture_eligible = (len([x for x in self.angular_velocity_window if x > velocity_threshold])
                             and (fingers == self.pointer_gesture or self.state is self.State.recording))
+
+        if self.bearing_zero is not None:
+            # Constrain gesture to a cone
+            gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
+
+            bearing = np.clip(bearing_delta(self.bearing_zero, bearing),
+                              -1 / 2 * gesture_cone_angle,
+                              1 / 2 * gesture_cone_angle)
+
+            # Scale bearings to ML-ready 0.0-1.0 values
+            bearing /= gesture_cone_angle
+            bearing += 0.5
 
         if gesture_eligible:
             if self.state is not self.State.recording:
@@ -730,7 +730,7 @@ class SomaticTrainerHomeWindow(Frame):
         del self.raw_data_buffer[:]
         self.current_gesture_duration = 0
         self.bearing_zero = None
-        self.last_bearing_received = None
+        self.last_unprocessed_bearing_received = None
         self.last_coordinate_visualized = None
 
     def visualize(self, path):
