@@ -3,44 +3,39 @@ import logging
 from typing import List, Tuple, Any
 import numpy as np
 
-standard_gesture_time = 1000  # Milliseconds
-sampling_rate = 10  # Milliseconds
+standard_gesture_length = 50  # Length of (yaw, pitch) coordinates per gesture to be fed into ML algorithm
 
 logging.basicConfig(level=logging.INFO)
 
 
 class Gesture:
-    def __init__(self, glyph, bearings, accelerations):
+    def __init__(self, glyph, bearings, raw_data):
         """
 
-        :param bearings:
+        :param bearings: Standardized ordered list of (yaw/pitch) coordinates
         :type bearings: np.array
-        :param accelerations:
-        :type accelerations: np.array
-        :param glyph:
+        :param raw_data: Raw data collected during training,
+        in case we make a processing boo-boo and need to retroactively fix things
+        :type raw_data: list
+        :param glyph: Which letter or opcode this gesture represents
         :type glyph: str
         """
 
-        expected_count = round(standard_gesture_time / sampling_rate)
-
-        if bearings.shape != (expected_count, 2) or accelerations.shape != (expected_count, 3):
-            raise AttributeError('Data invalid - got {} orientations and {} acceleration data shape instead of {}'
-                                 .format(len(bearings), accelerations.shape, expected_count))
+        if bearings.shape != (50, 2):
+            raise AttributeError('Data invalid - got {} orientations instead of {}'
+                                 .format(len(bearings), standard_gesture_length))
 
         self.bearings = bearings
-        self.accelerations = accelerations
+        self.raw_data = raw_data
         self.glyph = glyph
 
     def to_dict(self):
         datastore = {
             'g': self.glyph,
             'b': self.bearings.tolist(),
-            'a': self.accelerations.tolist()
+            'r': self.raw_data
         }
         return datastore
-
-    def to_training_data(self):
-        return np.array([list(b) + list(a) for b, a in zip(self.bearings, self.accelerations)])
 
     @staticmethod
     def from_dict(datastore):
@@ -48,12 +43,11 @@ class Gesture:
             glyph = datastore['g']
 
             bearings = np.array(datastore['b'])
-            assert len(bearings) == round(standard_gesture_time / sampling_rate)
+            assert len(bearings) == standard_gesture_length
 
-            accelerations = np.array(datastore['a'])
-            assert accelerations.shape == (round(standard_gesture_time / sampling_rate), 3)
+            raw_data = datastore['r']
 
-            return Gesture(glyph, bearings, accelerations)
+            return Gesture(glyph, bearings, raw_data)
 
         except (AssertionError, AttributeError, KeyError):
             logging.exception('Error parsing dict {}...'.format(str(datastore)[:20]))
@@ -66,7 +60,7 @@ class GestureTrainingSet:
 
     big_ole_list_o_glyphs = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.,?!@#/ 1234567890'
     short_glyphs = '., '
-    current_version = 2  # For deleting old saves
+    current_version = 3  # For deleting old saves
 
     def __init__(self):
         self.target_examples_per_glyph = 100
@@ -125,7 +119,7 @@ class GestureTrainingSet:
         labels = []
 
         for example in self.examples:
-            data.append(example.to_training_data())
+            data.append(example.bearings)
             labels.append(ord(example.glyph) - ord('a'))
 
         return np.array(data), np.array(labels)

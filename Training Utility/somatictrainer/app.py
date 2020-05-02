@@ -15,8 +15,9 @@ import os
 from PIL import Image, ImageTk, ImageDraw
 from enum import Enum
 import tensorflow.keras as keras
+from copy import deepcopy
 from somatictrainer.util import *
-from somatictrainer.gestures import Gesture, GestureTrainingSet, standard_gesture_time, sampling_rate
+from somatictrainer.gestures import Gesture, GestureTrainingSet, standard_gesture_length
 
 logging.basicConfig(level=logging.INFO)
 
@@ -72,6 +73,8 @@ class SomaticTrainerHomeWindow(Frame):
         self.training_set = GestureTrainingSet()
 
         self.gesture_buffer = []
+        self.raw_data_buffer = []
+        self.current_gesture_duration = 0
 
         self.bearing_zero = None
         self.gesture_hand_position = None
@@ -269,12 +272,9 @@ class SomaticTrainerHomeWindow(Frame):
 
             if command['type'] is 'rx':
                 bearing = command['bearing']
-                accelerometer = command['accel']
                 position = command['position']
                 if self.state is not self.State.disconnected and self.state is not self.State.quitting:
-                    self.update_status(command['fingers'],
-                                       bearing, accelerometer,
-                                       command['freq'])
+                    self.update_status(command['fingers'], bearing, command['freq'])
 
                     fingers = command['fingers']
                     hand_id = fingers[0] * 0b1000 + fingers[1] * 0b0100 + fingers[2] * 0b0010 + fingers[3] * 0b0001
@@ -518,71 +518,35 @@ class SomaticTrainerHomeWindow(Frame):
                 logging.debug('Fingers: {0}'.format(fingers))
 
                 bearing = np.array([float(t) for t in tokens[4:7]])
-
-                # orientation = quaternion.quaternion(w, x, y, z)
-
-                local_acceleration = np.array([float(t) for t in tokens[7:10]])
+                acceleration = np.array([float(t) for t in tokens[7:10]])
 
                 microseconds = float(tokens[-1])
 
                 logging.debug('Sample parsed')
 
-                self.handle_sample(fingers, bearing, local_acceleration, microseconds)
+                self.handle_sample(fingers, bearing, acceleration, microseconds)
 
-    def handle_sample(self, fingers, bearing, local_acceleration, microseconds):
+    def handle_sample(self, fingers, bearing, acceleration, microseconds):
         """
 
         :type fingers: list of bool
         :type bearing: np.array
-        :type local_acceleration: np.array
+        :type acceleration: np.array
         :type microseconds: float
         """
-
-        orientation = custom_euler_to_quat(bearing[0], bearing[1], bearing[2])
-        acceleration = quaternion.rotate_vectors(orientation, local_acceleration)
-
-        logging.debug('Acceleration from gravity: {}'.format(acceleration))
-
-        acceleration[0] -= 0.005  # I think this is introduced by rounding/precision error
-        acceleration[1] -= 0.025
-        acceleration[2] -= 0.99  # Get outta here gravity
-
-        deadzone = 0
-        if abs(acceleration[0] - .5) <= deadzone:
-            acceleration[0] = .5
-        if abs(acceleration[1] - .5) <= deadzone:
-            acceleration[1] = .5
-        if abs(acceleration[2] - .5) <= deadzone:
-            acceleration[2] = .5
-
-        # Constrain acceleration to a reasonable level
-        max_acceleration_magnitude = 2
-        acceleration = np.clip(acceleration, -max_acceleration_magnitude, max_acceleration_magnitude)
-
-        # Convert acceleration to ML-ready 0.0-1.0 values
-        acceleration /= max_acceleration_magnitude * 2
-        acceleration += 0.5
-
-        acceleration = 1 - acceleration
-
-        acceleration[1] -= .03
-
-        self.starting_velocity_estimation_buffer.append((acceleration, microseconds))
-
-        logging.debug('Scaled acceleration from movement: {}'.format(acceleration))
 
         if microseconds == 0:
             frequency = 0
         else:
             frequency = 1 / (microseconds / 1000000)
 
+        raw_bearing = bearing
+
         bearing = np.array([bearing[0], bearing[1]])  # We don't care about roll
 
         if self.bearing_zero is not None:
             # Constrain gesture to a cone
             gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
-
-            raw_bearing = bearing
 
             bearing = np.clip(bearing_delta(self.bearing_zero, bearing),
                               -1 / 2 * gesture_cone_angle,
@@ -619,8 +583,6 @@ class SomaticTrainerHomeWindow(Frame):
         gesture_eligible = (len([x for x in self.angular_velocity_window if x > velocity_threshold])
                             and (fingers == self.pointer_gesture or self.state is self.State.recording))
 
-        motion_scale = 200
-
         if gesture_eligible:
             if self.state is not self.State.recording:
                 self.path_display.delete(ALL)
@@ -634,30 +596,20 @@ class SomaticTrainerHomeWindow(Frame):
 
                 self.gesture_hand_velocity = np.array([0.0, 0.0, 0.0])
 
-                for accel, time in self.starting_velocity_estimation_buffer:
-                    self.gesture_hand_velocity += (accel - 0.5) * time / 1000000 * motion_scale
-
                 bearing = np.array([0.5, 0.5])
 
-                self.gesture_buffer.append((bearing, local_acceleration, 0))
+                self.gesture_buffer.append(bearing)
 
                 self.state = self.State.recording
             else:
-                self.gesture_buffer.append((bearing, acceleration, self.gesture_buffer[-1][2] + microseconds))
-                # self.gesture_hand_velocity *= 0.9
-                self.gesture_hand_velocity += (acceleration - 0.5) * microseconds / 1000000 * motion_scale
-                self.gesture_hand_position += self.gesture_hand_velocity * microseconds / 1000000 * motion_scale
-                logging.debug('Relative bearing: {0}'.format(str(bearing)))
-                logging.debug('Gesture position: ({0:.2f}, {1:.2f}, {2:.2f}'.
-                              format(self.gesture_hand_position[0],
-                                     self.gesture_hand_position[1],
-                                     self.gesture_hand_position[2]))
+                self.gesture_buffer.append(bearing)
+
+            self.raw_data_buffer.append({'b': raw_bearing.tolist(), 'a': acceleration.tolist(), 't': microseconds})
+            self.current_gesture_duration += microseconds
 
         else:
             if self.state is self.State.recording:
-                duration = self.gesture_buffer[-1][2]
-
-                logging.info('Sample done, {} points, {} ms'.format(len(self.gesture_buffer), duration / 1000))
+                logging.info('Sample done, {} points'.format(len(self.gesture_buffer)))
                 self.status_line.configure(bg='OliveDrab1')
 
                 def flash_red():
@@ -672,11 +624,9 @@ class SomaticTrainerHomeWindow(Frame):
                     self.path_display.create_text((5, 245), text=text, anchor=SW)
 
                 try:
-                    processed_bearings, processed_accel = process_samples(self.gesture_buffer,
-                                                                          standard_gesture_time,
-                                                                          sampling_rate)
+                    processed_bearings = process_samples(np.array(self.gesture_buffer), standard_gesture_length)
 
-                    new_gesture = Gesture('', processed_bearings, processed_accel)
+                    new_gesture = Gesture('', processed_bearings, deepcopy(self.raw_data_buffer))
 
                     self.visualize(processed_bearings)
                 except AttributeError:
@@ -684,24 +634,24 @@ class SomaticTrainerHomeWindow(Frame):
                     new_gesture = None
 
                 if new_gesture and len(self.glyph_picker.selection()) is 0:
-                    # Debug Code!
-                    daters = new_gesture.to_training_data()[:, :3]
-                    print(daters)
-
-                    results = self.model.predict(daters.reshape(1, 100, 3))
-                    results = sorted([[chr(ord('a') + i), j] for i, j in enumerate(results[0])],
-                                     key=lambda item: item[1], reverse=True)
-
-                    for index, value in results[:2]:
-                        print('{}: {:.0f}'.format(index, value * 100))
-
-                    if duration > 300000:
-                        self.path_display.create_text((125, 125), text=results[0][0],
-                                                      font=font.Font(family='Comic Sans', size=200))
+                    # # Debug Code!
+                    # daters = new_gesture.bearings
+                    # print(daters)
+                    #
+                    # results = self.model.predict(daters.reshape(1, standard_gesture_length, 2))
+                    # results = sorted([[chr(ord('a') + i), j] for i, j in enumerate(results[0])],
+                    #                  key=lambda item: item[1], reverse=True)
+                    #
+                    # for index, value in results[:2]:
+                    #     print('{}: {:.0f}'.format(index, value * 100))
+                    #
+                    # if self.current_gesture_duration > 300000:
+                    #     self.path_display.create_text((125, 125), text=results[0][0],
+                    #                                   font=font.Font(family='Comic Sans', size=200))
 
                     overlay_text('Discarding - no glyph selected')
 
-                    if duration > 300000:
+                    if self.current_gesture_duration > 300000:
                         flash_blue()
                     else:
                         flash_red()
@@ -709,11 +659,11 @@ class SomaticTrainerHomeWindow(Frame):
                     selected_glyph = self.glyph_picker.selection()[0]
                     short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
 
-                    if duration > 0 and (short_glyph or duration > 300000):
-                        min_yaw = min(sample[0][0] for sample in self.gesture_buffer)
-                        max_yaw = max(sample[0][0] for sample in self.gesture_buffer)
-                        min_pitch = min(sample[0][1] for sample in self.gesture_buffer)
-                        max_pitch = max(sample[0][1] for sample in self.gesture_buffer)
+                    if self.current_gesture_duration > 0 and (short_glyph or self.current_gesture_duration > 300000):
+                        min_yaw = min(sample[0] for sample in self.gesture_buffer)
+                        max_yaw = max(sample[0] for sample in self.gesture_buffer)
+                        min_pitch = min(sample[1] for sample in self.gesture_buffer)
+                        max_pitch = max(sample[1] for sample in self.gesture_buffer)
 
                         tiniest_glyph = 1 / 32 * np.pi
 
@@ -747,25 +697,25 @@ class SomaticTrainerHomeWindow(Frame):
             self.queue.put({'type': 'rx',
                             'fingers': fingers,
                             'bearing': bearing,
-                            'accel': acceleration,  # if self.state is self.State.recording else local_acceleration,
                             'position': self.gesture_hand_position,
                             'freq': frequency})
 
-    def update_status(self, fingers, bearing, accelerometer, frequency):
+    def update_status(self, fingers, bearing, frequency):
         def finger(value):
             return '.' if value else '|'
 
-        text = 'Received {0}{1}{2}{3}_, ({4:.2f},{5:.2f}), ({6:.2f}, {7:.2f}, {8:.2f}) at {9}Hz' \
+        text = 'Received {}{}{}{}_, ({:.2f},{:.2f}) at {}Hz' \
             .format(finger(fingers[0]), finger(fingers[1]),
                     finger(fingers[2]), finger(fingers[3]),
                     bearing[0], bearing[1],
-                    accelerometer[0], accelerometer[1], accelerometer[2],
                     round(frequency))
 
         self.status_line.configure(text=text, bg='SeaGreen1' if self.state is self.State.recording else 'OliveDrab1')
 
     def cancel_gesture(self):
         del self.gesture_buffer[:]
+        del self.raw_data_buffer[:]
+        self.current_gesture_duration = 0
         self.bearing_zero = None
         self.gesture_hand_position = None
         self.gesture_hand_velocity = None
@@ -799,28 +749,6 @@ class SomaticTrainerHomeWindow(Frame):
             last_point = [x_coord, y_coord]
 
             self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2), fill='SeaGreen1')
-
-
-# def _path_to_line_points(path, height, width, xpad=0, ypad=0):
-#     dots = []
-#
-#     for bearing in path:
-#         x_coord = np.tan(bearing[0])  # * 120 + 122
-#         y_coord = np.tan(bearing[1])  # * -120 + 122
-#         dots.append([x_coord, y_coord])
-#
-#     min_x = min([coord[0] for coord in dots])
-#     max_x = max([coord[0] for coord in dots])
-#     min_y = min([coord[1] for coord in dots])
-#     max_y = max([coord[1] for coord in dots])
-#
-#     output = []
-#
-#     for x, y in dots:
-#         output.append((_scale(x, min_x, max_x, xpad, width - xpad * 2),
-#                        _scale(y, min_y, max_y, ypad, height - ypad * 2)))
-#
-#     return output
 
 
 def _scale(x, in_min, in_max, out_min, out_max):

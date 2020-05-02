@@ -12,12 +12,6 @@ def main():
     corpus = GestureTrainingSet.load('E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\\Training Utility\\abctest.json')
 
     data, labels = corpus.to_training_set()
-    stripped_data = []
-    for entry in data:
-        no_accelerometer = [x[:3] for x in entry]
-        stripped_data.append(no_accelerometer)
-
-    data = np.array(stripped_data)
 
     glyphs_in_training_set = len(np.unique(labels))
     one_hot_labels = keras.utils.to_categorical(labels, num_classes=glyphs_in_training_set)

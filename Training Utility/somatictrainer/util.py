@@ -124,133 +124,111 @@ def custom_euler_to_quat(yaw, pitch, roll):
     return q
 
 
-def process_samples(samples: List[Tuple[np.array, np.array, int]], standard_gesture_time, sampling_rate):
-    if not samples:
-        raise AttributeError('Samples and/or timedeltas not provided')
-
-    if not len(samples):
-        raise AttributeError('Samples and/or timedeltas list are empty')
+def process_samples(samples: np.array, desired_length):
+    if not len(samples) > 1:
+        raise AttributeError('Sample list is empty')
 
     logging.info('Normalizing:\n{0!r}'.format(samples))
 
-    bearings = np.vstack([x[0] for x in samples])
-    raw_accel = np.vstack([x[1] for x in samples])
-    timestamps = np.array([x[2] for x in samples])
-
     # Strip redundant bearings
-    unique_bearings = [bearings[0]]
-    for index, bearing in enumerate(bearings):
+    unique_bearings = [samples[0]]
+    for index, bearing in enumerate(samples):
         if not index:
             continue
 
-        if np.isclose(bearing[0], bearings[index - 1, 0]) and np.isclose(bearing[1], bearings[index - 1, 1]):
+        if np.isclose(bearing[0], samples[index - 1, 0]) and np.isclose(bearing[1], samples[index - 1, 1]):
             logging.debug('Discarding redundant point ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
         else:
             unique_bearings.append(bearing)
 
-    bearings = np.array(unique_bearings)
+    samples = np.array(unique_bearings)
 
     # Remap standardized bearings so gestures are the same size
-    yaw_min = min(bearings[:, 0])
-    yaw_max = max(bearings[:, 0])
+    yaw_min = min(samples[:, 0])
+    yaw_max = max(samples[:, 0])
 
-    pitch_min = min(bearings[:, 1])
-    pitch_max = max(bearings[:, 1])
+    pitch_min = min(samples[:, 1])
+    pitch_max = max(samples[:, 1])
 
     magnitude = np.linalg.norm([yaw_max - yaw_min, pitch_max - pitch_min])
     fudge_factor = 1 / 10
 
     early_crap_count = 0
 
-    for i in range(1, len(bearings)):
-        if np.linalg.norm([bearings[i, 0] - bearings[0, 0],
-                           bearings[i, 1] - bearings[0, 1]]) > magnitude * fudge_factor:
+    for i in range(1, len(samples)):
+        if np.linalg.norm([samples[i, 0] - samples[0, 0],
+                           samples[i, 1] - samples[0, 1]]) > magnitude * fudge_factor:
             logging.debug('Done stripping leading points - ({:.3f}, {:.3f}) is far enough from start point '
                           '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
-                            bearings[i, 0], bearings[i, 1], bearings[0, 0], bearings[0, 1],
+                            samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
                             magnitude * fudge_factor,
-                            np.linalg.norm([bearings[i, 0] - bearings[0, 0],
-                                            bearings[i, 1] - bearings[0, 1]])))
+                            np.linalg.norm([samples[i, 0] - samples[0, 0],
+                                            samples[i, 1] - samples[0, 1]])))
             break
         else:
             logging.debug('Stripping leading point ({:.3f}, {:.3f}) - too close to start point ({:.3f}, {:.3f}). '
                           'Must be {:.3f} units away, but is {:.3f}.'.format(
-                            bearings[i, 0], bearings[i, 1], bearings[0, 0], bearings[0, 1],
+                            samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
                             magnitude * fudge_factor,
-                            np.linalg.norm([bearings[i, 0] - bearings[0, 0],
-                                            bearings[i, 1] - bearings[0, 1]])))
+                            np.linalg.norm([samples[i, 0] - samples[0, 0],
+                                            samples[i, 1] - samples[0, 1]])))
             early_crap_count += 1
 
-    start_point = bearings[0]
+    start_point = samples[0]
 
-    trimmed = bearings[early_crap_count:].tolist()
+    trimmed = samples[early_crap_count:].tolist()
 
-    bearings = np.array([start_point] + trimmed)
+    samples = np.array([start_point] + trimmed)
 
-    logging.debug('Early crap stripped: {}'.format(bearings))
+    logging.debug('Early crap stripped: {}'.format(samples))
 
     late_crap_count = 0
 
-    for i in range(1, len(bearings)):
-        if np.linalg.norm([bearings[-i, 0] - bearings[- 1, 0],
-                           bearings[-i, 1] - bearings[- 1, 1]]) > magnitude * fudge_factor:
+    for i in range(1, len(samples)):
+        if np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
+                           samples[-i, 1] - samples[- 1, 1]]) > magnitude * fudge_factor:
             logging.debug('Done stripping trailing points - ({:.3f}, {:.3f}) is far enough from endpoint '
                           '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
-                            bearings[-i, 0], bearings[-i, 1], bearings[-1, 0], bearings[-1, 1],
+                            samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
                             magnitude * fudge_factor,
-                            np.linalg.norm([bearings[-i, 0] - bearings[- 1, 0],
-                                            bearings[-i, 1] - bearings[- 1, 1]])))
+                            np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
+                                            samples[-i, 1] - samples[- 1, 1]])))
             break
         else:
             logging.debug('Stripping trailing point ({:.3f}, {:.3f}) - too close to endpoint ({:.3f}, {:.3f}). '
                           'Must be {:.3f} units away, but is {:.3f}.'.format(
-                            bearings[-i, 0], bearings[-i, 1], bearings[-1, 0], bearings[-1, 1],
+                            samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
                             magnitude * fudge_factor,
-                            np.linalg.norm([bearings[-i, 0] - bearings[- 1, 0],
-                                            bearings[-i, 1] - bearings[- 1, 1]])))
+                            np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
+                                            samples[-i, 1] - samples[- 1, 1]])))
             late_crap_count += 1
 
     if late_crap_count:
-        endpoint = bearings[-1]
-        trimmed = bearings[:-late_crap_count - 1].tolist()
-        bearings = np.array(trimmed + [endpoint])
+        endpoint = samples[-1]
+        trimmed = samples[:-late_crap_count - 1].tolist()
+        samples = np.array(trimmed + [endpoint])
 
-    logging.debug('Late crap stripped: {}'.format(bearings))
-
-    if not sum(timestamps):
-        raise AttributeError('Gesture has no duration')
-
-    target_sample_count = int(np.ceil(standard_gesture_time / sampling_rate))
-
-    scaling_factor = standard_gesture_time / timestamps[-1]
-    # Standardize times by interpolating
-    scaled_times = timestamps * scaling_factor
-
-    accel_model = interp1d(scaled_times, raw_accel, axis=0, kind='cubic', fill_value='extrapolate')
-
-    standardized_accel = accel_model(np.linspace(0, standard_gesture_time,
-                                                 num=int(np.ceil(standard_gesture_time / sampling_rate)),
-                                                 endpoint=True))
+    logging.debug('Late crap stripped: {}'.format(samples))
 
     # Standardize bearings 'curve' to evenly-spaced points
-    segment_lengths = [np.linalg.norm([bearings[i, 0] - bearings[i - 1, 0], bearings[i, 1] - bearings[i - 1, 1]])
-                       for i in range(1, len(bearings))]
+    segment_lengths = [np.linalg.norm([samples[i, 0] - samples[i - 1, 0], samples[i, 1] - samples[i - 1, 1]])
+                       for i in range(1, len(samples))]
 
     curve_length = sum(segment_lengths)
 
-    target_segment_length = curve_length / (target_sample_count - 1)
+    target_segment_length = curve_length / (desired_length - 1)
 
-    standardized_bearings = [bearings[0]]
+    standardized_bearings = [samples[0]]
 
     logging.debug(
-        'Segment lengths: {} - {} segments, {} points'.format(segment_lengths, len(segment_lengths), len(bearings)))
+        'Segment lengths: {} - {} segments, {} points'.format(segment_lengths, len(segment_lengths), len(samples)))
     logging.debug('Total length: {:.2f} Target segment length: {:.4f}'.format(curve_length, target_segment_length))
 
     lower_length = 0
     higher_length = 0
     first_longer_sample = 0
 
-    for i in range(1, target_sample_count):
+    for i in range(1, desired_length):
         logging.debug('Looking to place a point at {:.3f} units along curve'.format(i * target_segment_length))
 
         moved_along_curve = False
@@ -270,8 +248,8 @@ def process_samples(samples: List[Tuple[np.array, np.array, int]], standard_gest
             logging.debug('Previous point at {:.3f} units along curve still works'.format(higher_length))
             logging.debug('There we go')
 
-        low_point = bearings[first_longer_sample - 1]
-        high_point = bearings[first_longer_sample]
+        low_point = samples[first_longer_sample - 1]
+        high_point = samples[first_longer_sample]
         position_along_segment = (i * target_segment_length - lower_length) / (higher_length - lower_length)
 
         standardized_point_x = low_point[0] + position_along_segment * (high_point[0] - low_point[0])
@@ -299,7 +277,7 @@ def process_samples(samples: List[Tuple[np.array, np.array, int]], standard_gest
                                        custom_interpolate(p, 0, max(total_width, total_height), 0, 1)]
                                       for y, p in standardized_bearings])
 
-    return standardized_bearings, standardized_accel
+    return standardized_bearings
 
 
 def wrapped_delta(old, new):
