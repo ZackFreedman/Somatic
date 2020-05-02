@@ -77,8 +77,6 @@ class SomaticTrainerHomeWindow(Frame):
         self.current_gesture_duration = 0
 
         self.bearing_zero = None
-        self.gesture_hand_position = None
-        self.gesture_hand_velocity = None
         self.last_bearing_received = None
         self.angular_velocity_window = deque(maxlen=5)
         self.starting_velocity_estimation_buffer = deque(maxlen=10)
@@ -272,7 +270,6 @@ class SomaticTrainerHomeWindow(Frame):
 
             if command['type'] is 'rx':
                 bearing = command['bearing']
-                position = command['position']
                 if self.state is not self.State.disconnected and self.state is not self.State.quitting:
                     self.update_status(command['fingers'], bearing, command['freq'])
 
@@ -298,13 +295,6 @@ class SomaticTrainerHomeWindow(Frame):
 
                     self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
                                                   fill='SeaGreen1')
-
-                    if position is not None:
-                        x_coord = position[1] + 125
-                        y_coord = position[2] + 125
-
-                        self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
-                                                      fill='red')
 
             if command['type'] is 'quit':
                 self.master.destroy()
@@ -592,9 +582,6 @@ class SomaticTrainerHomeWindow(Frame):
                 self.status_line.configure(bg='SeaGreen1')
 
                 self.bearing_zero = bearing
-                self.gesture_hand_position = np.array([0.0, 0.0, 0.0])
-
-                self.gesture_hand_velocity = np.array([0.0, 0.0, 0.0])
 
                 bearing = np.array([0.5, 0.5])
 
@@ -697,7 +684,6 @@ class SomaticTrainerHomeWindow(Frame):
             self.queue.put({'type': 'rx',
                             'fingers': fingers,
                             'bearing': bearing,
-                            'position': self.gesture_hand_position,
                             'freq': frequency})
 
     def update_status(self, fingers, bearing, frequency):
@@ -717,8 +703,6 @@ class SomaticTrainerHomeWindow(Frame):
         del self.raw_data_buffer[:]
         self.current_gesture_duration = 0
         self.bearing_zero = None
-        self.gesture_hand_position = None
-        self.gesture_hand_velocity = None
         self.last_bearing_received = None
         self.last_coordinate_visualized = None
 
