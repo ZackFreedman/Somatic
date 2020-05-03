@@ -250,15 +250,14 @@ class SomaticTrainerHomeWindow(Frame):
 
         # self.reload_example_list()
         position = self.thumbnail_buttons.index(button)
-        new_total = len(self.thumbnail_buttons) - 1
         button.grid_forget()
         button.destroy()
-        del self.thumbnail_buttons[position]
+        self.thumbnail_buttons.remove(button)
 
-        for i in range(position, new_total):
-            self.thumbnail_buttons[i].grid(row=int(position / 5), column=int(position % 5))
+        for i in range(position, len(self.thumbnail_buttons)):
+            self.thumbnail_buttons[i].grid(row=int(i / 5), column=int(i % 5))
 
-        self.reload_glyph_picker()
+        self.glyph_picker.item(button.gesture.glyph, value=self.training_set.count(button.gesture.glyph))
 
         # We can save now! Yay!
         self.open_file_has_been_modified = True
@@ -709,8 +708,9 @@ class SomaticTrainerHomeWindow(Frame):
                                     self.save_file()
                                     self.change_count_since_last_save = 0
 
-                            self.reload_glyph_picker()
                             self.insert_thumbnail_button_for(new_gesture)
+                            self.glyph_picker.item(new_gesture.glyph,
+                                                   value=self.training_set.count(new_gesture.glyph))
                             self.thumbnail_canvas.yview_moveto(1)
 
                         else:
