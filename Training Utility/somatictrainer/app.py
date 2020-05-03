@@ -68,6 +68,8 @@ class SomaticTrainerHomeWindow(Frame):
         self.receiving = False
         self.last_hand_id = -1
 
+        self._config_file_version = 1
+
         self.open_file_pathspec = ''
         self.open_file_has_been_modified = False
         self.change_count_since_last_save = 0
@@ -101,10 +103,16 @@ class SomaticTrainerHomeWindow(Frame):
         self.port_menu = Menu(self.menu_bar, tearoff=0, postcommand=self.populate_serial_port_menu)
         self.menu_bar.add_cascade(label='Serial Port', menu=self.port_menu)
 
+        # This baloney is needed to get the selector menu checkboxes to play nice
+        self._serial_port_active_var = BooleanVar()
+        self._serial_port_active_var.set(True)
+        self._serial_port_inactive_var = BooleanVar()
+        self._serial_port_inactive_var.set(False)
+
         master.config(menu=self.menu_bar)
 
-        left_column = Frame(self, width=250, bg='red')
-        right_column = Frame(self, bg='blue')
+        left_column = Frame(self, width=250)
+        right_column = Frame(self)
 
         Label(left_column, text='Hand').pack(fill=X)
         self.hand_display = Canvas(left_column, width=250, height=250)
@@ -112,7 +120,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.hand_display.pack(fill=X)
 
         Label(left_column, text='Path').pack(fill=X)
-        self.path_display = Canvas(left_column, width=250, height=250)
+        self.path_display = Canvas(left_column, width=250, height=250, bg='white')
         self.path_display.pack(fill=X)
 
         label_width_locking_frame = Frame(right_column, height=20, width=250)
@@ -147,7 +155,7 @@ class SomaticTrainerHomeWindow(Frame):
             self.thumbnail_canvas.bind_all('<MouseWheel>', on_wheel_scroll)
 
         def unbind_wheel_from_thumbnails(event):
-            self.thumbnail_canvas.unbind('<MouseWheel>')
+            self.thumbnail_canvas.unbind_all('<MouseWheel>')
 
         def on_wheel_scroll(event):
             self.thumbnail_canvas.yview_scroll(int(event.delta / -120), 'units')
@@ -178,8 +186,50 @@ class SomaticTrainerHomeWindow(Frame):
         self.grid_rowconfigure(0, weight=1)
 
         # Debug code!
-        self.model = keras.models.load_model(
-            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\2020-05-01T13-19.h5')
+        # self.model = keras.models.load_model(
+        #     'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\2020-05-01T13-19.h5')
+
+    def save_state(self):
+        datastore = {'port': self.port.port if self.port is not None and self.port.isOpen() else None,
+                     'wip': self.open_file_pathspec,
+                     'selected-glyph': self.get_selected_glyph(),
+                     'version': self._config_file_version}
+
+        with open(os.getcwd() + 'config.json', 'w') as f:
+            json.dump(datastore, f)
+
+    def restore_state(self):
+        if not os.path.isfile(os.getcwd() + 'config.json'):
+            logging.warning('No saved configuration, starting fresh')
+            return
+
+        with open(os.getcwd() + 'config.json', 'r') as f:
+            datastore = json.load(f)
+
+            if 'version' not in datastore or datastore['version'] != self._config_file_version:
+                logging.warning('Saved config is outdated, not loading')
+                return
+
+            if 'wip' in datastore:
+                self.open_file(datastore['wip'])
+                logging.info('Re-opening work-in-progress file {}'.format(datastore['wip']))
+
+                try:
+                    if 'selected-glyph' in datastore and datastore['selected-glyph']:
+                        self.glyph_picker.selection_set(datastore['selected-glyph'])
+                        logging.info('Resuming with glyph {} selected'.format(datastore['selected-glyph']))
+                except TclError:
+                    logging.warning("Couldn't select glyph {} - it doesn't exist?".format(datastore['selected-glyph']))
+
+            if 'port' in datastore and datastore['port']:
+                port_names = [port.device for port in comports()]
+
+                if datastore['port'] in port_names:
+                    self.disconnect()
+                    self.connect_to(datastore['port'])
+                    logging.info('Reconnected to glove on {}'.format(datastore['port']))
+                else:
+                    logging.info("Couldn't reconnect to port {}".format(datastore['port']))
 
     def reload_glyph_picker(self):
         scroll_position = self.glyph_picker.yview()[0]
@@ -272,7 +322,7 @@ class SomaticTrainerHomeWindow(Frame):
 
     def start(self):
         self.master.after(10, self.queue_handler)
-        self.connect_to('COM23')
+        self.restore_state()
 
     def stop(self):
         if self.open_file_has_been_modified:
@@ -285,6 +335,9 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.state = self.State.quitting
         self.receiving = False
+
+        self.save_state()
+
         self.queue.put({'type': 'quit'})
 
     def queue_handler(self):
@@ -363,9 +416,14 @@ class SomaticTrainerHomeWindow(Frame):
             self.open_file_has_been_modified = True
             self.reload_glyph_picker()
 
-    def open_file(self):
-        file_to_open = filedialog.askopenfilename(title='Select training data',
-                                                  filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
+    def open_file(self, file_to_open=None):
+        if file_to_open is None:
+            file_to_open = filedialog.askopenfilename(title='Select training data',
+                                                      filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
+
+        if not os.path.isfile(file_to_open):
+            logging.warning("Can't open training file because it doesn't exist - {}".format(file_to_open))
+            return
 
         if file_to_open:
             try:
@@ -428,17 +486,17 @@ class SomaticTrainerHomeWindow(Frame):
         self.port_menu.delete(0, 999)
 
         ports = comports()
-        checked = IntVar().set(1)
-        not_checked = IntVar().set(0)
+        self._serial_port_active_var.set(True)
+        self._serial_port_inactive_var.set(False)
 
         if ports:
             for path, _, __ in ports:
-                if self.port and path == self.port.port:
+                if self.port and self.port.isOpen() and path == self.port.port:
                     self.port_menu.add_checkbutton(label=path, command=self.disconnect,
-                                                   variable=checked, onvalue=1, offvalue=0)
+                                                   variable=self._serial_port_active_var, onvalue=True, offvalue=False)
                 else:
                     self.port_menu.add_checkbutton(label=path, command=lambda pathspec=path: self.connect_to(pathspec),
-                                                   variable=not_checked, onvalue=1, offvalue=0)
+                                                   variable=self._serial_port_inactive_var, onvalue=True, offvalue=False)
 
         else:
             self.port_menu.add_command(label='No serial ports available', state=DISABLED)
@@ -457,11 +515,12 @@ class SomaticTrainerHomeWindow(Frame):
             self.status_line.configure(text='Waiting for response...', bg='DarkGoldenrod2')
             self.port.write(bytes('>AT\r\n'.encode('utf-8')))
             self.start_receiving()
+
         except SerialException:
             logging.exception('dafuq')
             messagebox.showinfo("Can't open port", 'Port already opened by another process')
             self.state = self.State.disconnected
-            self.status_line.configure(text="Can't connect to {0}", bg='firebrick1')
+            self.status_line.configure(text="Can't connect to {}", bg='firebrick1'.format(portspec))
             self.port = None
 
     def disconnect(self):
@@ -757,11 +816,11 @@ class SomaticTrainerHomeWindow(Frame):
         x_center = (max(path[:, 0] - min(path[:, 0]))) / 2
         y_center = (max(path[:, 1] - min(path[:, 1]))) / 2
 
-        for i, coords in enumerate(path):
-            x_coord = (coords[0] + 0.5 - x_center) * 240
-            y_coord = (coords[1] + 0.5 - y_center) * 240
+        padding = 10
 
-            # logging.debug('Plotting ({}, {}) - scaled to ({}, {})'.format(x, y, x_coord, y_coord))
+        for i, coords in enumerate(path):
+            x_coord = (coords[0] + 0.5 - x_center) * (250 - padding * 2) + padding
+            y_coord = (coords[1] + 0.5 - y_center) * (250 - padding * 2) + padding
 
             if last_point:
                 green = int(_scale(i, 0, len(path), 255, 0))

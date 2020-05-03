@@ -39,10 +39,14 @@ unsigned long lastFingerStableTimestamps[4];
 float lastBearing[3];
 
 const float velocityThresholdToBegin = 2. / 1000000.;  // In rad/microsecond
-const float velocityThresholdToEnd = 0.5 / 1000000.;  // Also in rad/microsecond
+const float velocityThresholdToEnd = 1 / 1000000.;  // Also in rad/microsecond
 const int historyLength = 5;
 float angularVelocityWindow[historyLength];
+
 float bearingAtLastBuzz[2];
+const float distanceBetweenBuzzes = 15. / 180. * PI;
+elapsedMillis timeSinceBuzzStarted;
+unsigned long currentBuzzDuration;
 
 bool isGesturing;
 
@@ -87,6 +91,10 @@ void loop() {
   unsigned long timestamp = micros();
   float sampleRate = timestamp - lastTimestamp;
 
+  if (timeSinceBuzzStarted > currentBuzzDuration) {
+    analogWrite(vibePin, 0);
+  }
+
   if (bt.available() >= 5) {
     for (int i = 0; i < bt.available(); i++) {
       if (bt.read() == '>'
@@ -104,11 +112,7 @@ void loop() {
   if (imu.poll() & 0x04) {  // Only send data when we have new AHRS
     float theta = 0;
 
-    float headingDelta = wrappedDelta(lastBearing[0], imu.Quat[0]);
-    float pitchDelta = wrappedDelta(lastBearing[1],imu.Quat[1]);
-
-    float norm = sqrt(headingDelta * headingDelta + pitchDelta * pitchDelta);
-    theta = asin(norm);
+    theta = asin(norm(lastBearing[0], lastBearing[1], imu.Quat[0], imu.Quat[1]));
     float angularVelocity = theta / sampleRate;
     debug_print("Theta: ");
     debug_println(theta);
@@ -133,7 +137,7 @@ void loop() {
       if (fingerPosition == lastFingerPositions[i]) {
         lastFingerStableTimestamps[i] = millis();
       }
-      else if (millis() - lastFingerStableTimestamps[i] >= fingerDebounce) {
+      else if (isGesturing || millis() - lastFingerStableTimestamps[i] >= fingerDebounce) {
         lastFingerPositions[i] = fingerPosition;
         lastFingerStableTimestamps[i] = millis();
       }
@@ -142,15 +146,7 @@ void loop() {
       bt.print(',');
     }
 
-    //    float averageVelocity = 0;
     bool handIsMoving = false;
-    //    for (int i = 0; i < velocityThreshold; i++) {
-    //      averageVelocity += angularVelocityWindow[i];
-    //      if (angularVelocityWindow[i] > 0.05) {
-    //        handIsMoving = true;
-    //      }
-    //    }
-    //    averageVelocity /= velocityThreshold;
 
     for (int i = 0; i < historyLength; i++) {
       if ((isGesturing && angularVelocityWindow[i] >= velocityThresholdToEnd)
@@ -162,25 +158,25 @@ void loop() {
 
     if (handIsMoving) {
       if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
+        if (!isGesturing) {
+          buzzFor(250, 20);
+          bearingAtLastBuzz[0] = imu.Quat[0];
+          bearingAtLastBuzz[1] = imu.Quat[1];
+        }
         isGesturing = true;
-        analogWrite(vibePin, 75);
       }
     }
     else {
       isGesturing = false;
-      analogWrite(vibePin, 0);
     }
 
-    //  for (int i = 0; i < 3; i++) {
-    //    bt.print(imu.Quat[i], 4);
-    //    // Actually heading, pitch, and roll
-    //    bt.print(',');
-    //  }
-
-    //  if (imu.Quat[0] >= 0)
-    //    bt.print(imu.Quat[0]);
-    //  else
-    //    bt.print(imu.Quat[0] + 2 * PI);
+    if (timeSinceBuzzStarted >= 80
+        && isGesturing
+        && norm(bearingAtLastBuzz[0], bearingAtLastBuzz[1], imu.Quat[0], imu.Quat[1]) >= distanceBetweenBuzzes) {
+      buzzFor(250, 20);
+      bearingAtLastBuzz[0] = imu.Quat[0];
+      bearingAtLastBuzz[1] = imu.Quat[1];
+    }
 
     bt.print(imu.Quat[0] * -1, 4);
     bt.print(',');
@@ -202,12 +198,6 @@ void loop() {
 
     // Not sure if this is where the delta should be calculated
     bt.println(sampleRate);
-    //  bt.print(imu.Quat[0] * 180 / PI);
-    //  bt.print(',');
-    //  bt.print(imu.Quat[1] * 180 / PI);
-    //  bt.print(',');
-    //  bt.print(imu.Quat[2] * 180 / PI);
-    //  bt.println();
 
     lastTimestamp = timestamp;
     lastBearing[0] = imu.Quat[0];
@@ -243,5 +233,19 @@ float wrappedDelta(float oldValue, float newValue) {
     delta += 2 * PI;
 
   return delta;
+}
+
+void buzzFor(unsigned int strength, unsigned long duration) {
+  debug_println("Buzz!");
+  analogWrite(vibePin, strength);
+  timeSinceBuzzStarted = 0;
+  currentBuzzDuration = duration;
+}
+
+float norm(float oldX, float oldY, float newX, float newY) {
+  float xDelta = wrappedDelta(oldX, newX);
+  float yDelta = wrappedDelta(oldY, newY);
+
+  return sqrt(xDelta * xDelta + yDelta * yDelta);
 }
 
