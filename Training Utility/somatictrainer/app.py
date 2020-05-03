@@ -126,9 +126,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.glyph_picker.column('count', stretch=True)
         self.glyph_picker.heading('count', text='Count')
         self.glyph_picker.pack(fill=BOTH, expand=1, anchor=S + E)
-        # first_item = self.glyph_picker.get_children()[0]
-        # self.glyph_picker.focus(first_item)
-        # self.glyph_picker.selection_set(first_item)
+
         self.reload_glyph_picker()
         self.glyph_picker.bind('<<TreeviewSelect>>', lambda x: self.reload_example_list())
 
@@ -139,11 +137,11 @@ class SomaticTrainerHomeWindow(Frame):
         self.thumbnail_canvas = Canvas(picker_frame, bd=0, width=250, height=150, bg='white')
         self.thumbnail_canvas.grid(row=0, column=0, sticky=N + S + E + W)
 
-        scrollbar = Scrollbar(picker_frame)
-        scrollbar.grid(row=0, column=1, sticky=N + S)
+        self.thumbnail_scrollbar = Scrollbar(picker_frame)
+        self.thumbnail_scrollbar.grid(row=0, column=1, sticky=N + S)
 
-        self.thumbnail_canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.config(command=self.thumbnail_canvas.yview)
+        self.thumbnail_canvas.configure(yscrollcommand=self.thumbnail_scrollbar.set)
+        self.thumbnail_scrollbar.config(command=self.thumbnail_canvas.yview)
 
         def bind_wheel_to_thumbnails(event):
             self.thumbnail_canvas.bind_all('<MouseWheel>', on_wheel_scroll)
@@ -154,14 +152,18 @@ class SomaticTrainerHomeWindow(Frame):
         def on_wheel_scroll(event):
             self.thumbnail_canvas.yview_scroll(int(event.delta / -120), 'units')
 
-        self.thumbnail_frame = Frame(self.thumbnail_canvas)
+        self.thumbnail_frame = Frame(self.thumbnail_canvas, bg='white')
         self.thumbnail_frame.bind('<Enter>', bind_wheel_to_thumbnails)
         self.thumbnail_frame.bind('<Leave>', unbind_wheel_from_thumbnails)
+        self.thumbnail_frame.bind('<Configure>', lambda x: self.thumbnail_canvas.configure(
+            scrollregion=self.thumbnail_canvas.bbox(ALL)))
 
         self.thumbnail_canvas.create_window((0, 0), window=self.thumbnail_frame, anchor=NW)
 
         for i in range(5):
             self.thumbnail_frame.grid_columnconfigure(i, weight=1)
+
+        self.thumbnail_buttons = []
 
         picker_frame.pack(fill=X, anchor=S + E)
 
@@ -200,60 +202,76 @@ class SomaticTrainerHomeWindow(Frame):
         return selected_item
 
     def reload_example_list(self):
-        buttons = self.thumbnail_frame.winfo_children()
-        for button in buttons:
+        for button in self.thumbnail_buttons:
             button.grid_forget()
             button.destroy()
+
+        del self.thumbnail_buttons[:]
 
         selected_glyph = self.get_selected_glyph()
         if selected_glyph is None or not self.training_set.count(selected_glyph):
             return
 
-        for index, example in enumerate(self.training_set.get_examples_for(selected_glyph)):
-            if example in self.example_thumbnails:
-                thumbnail = self.example_thumbnails[example]
-            else:
-                thumbnail = ImageTk.PhotoImage(
-                    image=_gesture_to_image(
-                        self.training_set.get_examples_for(selected_glyph)[index].bearings, 50, 50, 2, 2, 2))
-                self.example_thumbnails[example] = thumbnail
+        for example in self.training_set.get_examples_for(selected_glyph):
+            self.insert_thumbnail_button_for(example)
 
-            button = Button(self.thumbnail_frame, image=thumbnail)
-            button.image = thumbnail  # Button doesn't have an image field - this monkey patch retains a reference
-            button.setvar('example_id', index)
-            button.configure(command=
-                             lambda i=index, g=selected_glyph:
-                             self.visualize(self.training_set.get_examples_for(g)[i].normalized_data))
+    def insert_thumbnail_button_for(self, example):
+        for button in self.thumbnail_buttons:
+            if button.gesture == example:
+                logging.debug('Already placed button for example w/ UUID {}'.format(example.uuid))
+                return
 
-            def delete_on_right_click(g, i):
-                logging.info('Removing glyph {} #{}'.format(g, i))
-                self.training_set.remove_at(g, i)
+        if example in self.example_thumbnails:
+            thumbnail = self.example_thumbnails[example]
+        else:
+            thumbnail = ImageTk.PhotoImage(
+                image=_gesture_to_image(
+                    example.bearings, 50, 50, 2, 2, 2))
+            self.example_thumbnails[example] = thumbnail
 
-                self.reload_example_list()
-                self.reload_glyph_picker()
+        button = Button(self.thumbnail_frame, image=thumbnail)
+        button.image = thumbnail  # Button doesn't have an image field - this monkey patch retains a reference
+        button.gesture = example  # Monkey-patch a reference to the gesture into the button to associate them
+        button.configure(command=lambda: self.visualize(example.bearings))
 
-                # We can save now! Yay!
-                self.open_file_has_been_modified = True
-                self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
-                self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
+        def place_button(b, position):
+            b.grid(row=int(position / 5), column=int(position % 5))
 
-                if self.open_file_pathspec:
-                    self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
-                    if self.change_count_since_last_save >= self.autosave_change_threshold:
-                        self.save_file()
-                        self.change_count_since_last_save = 0
+        def delete_on_right_click():
+            logging.info('Removing example for {}, UUID {}'.format(
+                button.gesture.glyph, str(button.gesture.uuid)))
+            self.training_set.remove(button.gesture)
 
-            # Right click on OSX
-            button.bind('<Button-2>', lambda event, g=selected_glyph, i=index: delete_on_right_click(g, i))
+            # self.reload_example_list()
+            position = self.thumbnail_buttons.index(button)
+            new_total = len(self.thumbnail_buttons) - 1
+            button.grid_forget()
+            button.destroy()
+            del self.thumbnail_buttons[position]
 
-            # Right click on Windows
-            button.bind('<Button-3>', lambda event, g=selected_glyph, i=index: delete_on_right_click(g, i))
+            for i in range(position, new_total):
+                place_button(self.thumbnail_buttons[i], i)
 
-            button.grid(row=int(index / 5), column=index % 5)
+            self.reload_glyph_picker()
 
-        self.thumbnail_canvas.configure(
-            # scrollregion=(0, 0, 250, int(self.training_set.count(selected_glyph) / 5) * 50))
-            scrollregion=self.thumbnail_canvas.bbox(ALL))
+            # We can save now! Yay!
+            self.open_file_has_been_modified = True
+            self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
+            self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
+
+            if self.open_file_pathspec:
+                self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
+                if self.change_count_since_last_save >= self.autosave_change_threshold:
+                    self.save_file()
+                    self.change_count_since_last_save = 0
+
+        # Right click on OSX
+        button.bind('<Button-2>', lambda x: delete_on_right_click())
+        # Right click on Windows
+        button.bind('<Button-3>', lambda x: delete_on_right_click())
+
+        self.thumbnail_buttons.append(button)
+        place_button(button, len(self.thumbnail_buttons) - 1)
 
     def start(self):
         self.master.after(10, self.queue_handler)

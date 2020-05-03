@@ -1,7 +1,8 @@
 import json
 import logging
-from typing import List, Tuple, Any
+from typing import List
 import numpy as np
+import uuid
 
 standard_gesture_length = 50  # Length of (yaw, pitch) coordinates per gesture to be fed into ML algorithm
 
@@ -9,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 class Gesture:
-    def __init__(self, glyph, bearings, raw_data):
+    def __init__(self, glyph, bearings, raw_data, gesture_uuid=None):
         """
 
         :param bearings: Standardized ordered list of (yaw/pitch) coordinates
@@ -19,6 +20,8 @@ class Gesture:
         :type raw_data: list
         :param glyph: Which letter or opcode this gesture represents
         :type glyph: str
+        :param gesture_uuid: A unique identifier used to tie the gesture to UI elements
+        :type gesture_uuid: uuid.UUID
         """
 
         if bearings.shape != (50, 2):
@@ -29,17 +32,28 @@ class Gesture:
         self.raw_data = raw_data
         self.glyph = glyph
 
+        if gesture_uuid is not None:
+            self.uuid = gesture_uuid
+        else:
+            self.uuid = uuid.uuid4()
+
     def to_dict(self):
         datastore = {
             'g': self.glyph,
             'b': self.bearings.tolist(),
-            'r': self.raw_data
+            'r': self.raw_data,
+            'id': str(self.uuid)
         }
         return datastore
 
     @staticmethod
     def from_dict(datastore):
         try:
+            if 'id' in datastore:
+                gesture_uuid = uuid.UUID(datastore['id'])
+            else:
+                gesture_uuid = None
+
             glyph = datastore['g']
 
             bearings = np.array(datastore['b'])
@@ -47,7 +61,7 @@ class Gesture:
 
             raw_data = datastore['r']
 
-            return Gesture(glyph, bearings, raw_data)
+            return Gesture(glyph, bearings, raw_data, gesture_uuid)
 
         except (AssertionError, AttributeError, KeyError):
             logging.exception('Error parsing dict {}...'.format(str(datastore)[:20]))
@@ -102,9 +116,18 @@ class GestureTrainingSet:
     def summarize(self):
         return {glyph: self.count(glyph) for glyph in self.big_ole_list_o_glyphs}
 
-    def remove(self, example):
-        if example in self.examples:
-            self.examples.remove(example)
+    def remove(self, example_or_uuid):
+        if type(example_or_uuid) is Gesture:
+            example = example_or_uuid
+            if example in self.examples:
+                self.examples.remove(example)
+
+        elif type(example_or_uuid) is uuid.UUID:
+            gesture_uuid = example_or_uuid
+            for example in self.examples:
+                if gesture_uuid == example.uuid:
+                    self.examples.remove(example)
+                    break
 
     def move(self, example, new_glyph):
         if example in self.examples:
