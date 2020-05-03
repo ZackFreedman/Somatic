@@ -1,7 +1,16 @@
+/*************
+ * Somatic data glove firmware
+ * by Zack Freedman of Voidstar Lab
+ * (c) Voidstar Lab 2019
+ * Somatic is licensed Creative Commons 4.0 Attribution Non-Commercial
+ * 
+ * Uses code by Paul Joffressen, Kris Winer, and the Arduino project
+ * 
+ * Deploy to Teensy 4.0 at max clock speed
+ */
+
 // The following dumb bullshit just lets us turn off serial debug
-
-#define DEBUG
-
+//#define DEBUG
 #define GET_MACRO(_1, _2, NAME, ...) NAME
 #ifdef DEBUG
 #define debug_print_formatted(x, y) Serial.print(x,y)
@@ -25,7 +34,6 @@
 
 // End dumb debugging bullshit
 
-//#include <i2c_t3.h>
 #include <Wire.h>
 #include "imu.h"
 
@@ -56,16 +64,10 @@ unsigned long lastTimestamp;
 IMU imu = IMU();
 
 void setup() {
-  //  Wire.beginTransmission(0x24);
-  //  Wire.write(0x03); // Select control register
-  //  Wire.write(0x3F); // Assign pins 0-5 to inputs
-  //  byte error = Wire.endTransmission();
-
-  //  Wire.begin(I2C_MASTER, 0x00, I2C_PINS_18_19, I2C_PULLUP_INT, I2C_RATE_400);
   Serial.begin(115200);
   bt.begin(115200);
 
-  analogWriteFrequency(vibePin, 93750);
+  analogWriteFrequency(vibePin, 93750);  // Set to high frequency so switching noise is inaudible
 
   // Some butt-head didn't leave room for i2c pullups on the lil board.
   // Using adjacent pins as makeshift 3V3 sources :|
