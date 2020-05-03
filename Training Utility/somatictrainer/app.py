@@ -234,44 +234,42 @@ class SomaticTrainerHomeWindow(Frame):
         button.gesture = example  # Monkey-patch a reference to the gesture into the button to associate them
         button.configure(command=lambda: self.visualize(example.bearings))
 
-        def place_button(b, position):
-            b.grid(row=int(position / 5), column=int(position % 5))
-
-        def delete_on_right_click():
-            logging.info('Removing example for {}, UUID {}'.format(
-                button.gesture.glyph, str(button.gesture.uuid)))
-            self.training_set.remove(button.gesture)
-
-            # self.reload_example_list()
-            position = self.thumbnail_buttons.index(button)
-            new_total = len(self.thumbnail_buttons) - 1
-            button.grid_forget()
-            button.destroy()
-            del self.thumbnail_buttons[position]
-
-            for i in range(position, new_total):
-                place_button(self.thumbnail_buttons[i], i)
-
-            self.reload_glyph_picker()
-
-            # We can save now! Yay!
-            self.open_file_has_been_modified = True
-            self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
-            self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
-
-            if self.open_file_pathspec:
-                self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
-                if self.change_count_since_last_save >= self.autosave_change_threshold:
-                    self.save_file()
-                    self.change_count_since_last_save = 0
-
         # Right click on OSX
-        button.bind('<Button-2>', lambda x: delete_on_right_click())
+        button.bind('<Button-2>', lambda x: self.delete_thumbnail_button(button))
         # Right click on Windows
-        button.bind('<Button-3>', lambda x: delete_on_right_click())
+        button.bind('<Button-3>', lambda x: self.delete_thumbnail_button(button))
 
         self.thumbnail_buttons.append(button)
-        place_button(button, len(self.thumbnail_buttons) - 1)
+        position = len(self.thumbnail_buttons) - 1
+        button.grid(row=int(position / 5), column=int(position % 5))
+
+    def delete_thumbnail_button(self, button):
+        logging.info('Removing example for {}, UUID {}'.format(
+            button.gesture.glyph, str(button.gesture.uuid)))
+        self.training_set.remove(button.gesture)
+
+        # self.reload_example_list()
+        position = self.thumbnail_buttons.index(button)
+        new_total = len(self.thumbnail_buttons) - 1
+        button.grid_forget()
+        button.destroy()
+        del self.thumbnail_buttons[position]
+
+        for i in range(position, new_total):
+            self.thumbnail_buttons[i].grid(row=int(position / 5), column=int(position % 5))
+
+        self.reload_glyph_picker()
+
+        # We can save now! Yay!
+        self.open_file_has_been_modified = True
+        self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
+        self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
+
+        if self.open_file_pathspec:
+            self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
+            if self.change_count_since_last_save >= self.autosave_change_threshold:
+                self.save_file()
+                self.change_count_since_last_save = 0
 
     def start(self):
         self.master.after(10, self.queue_handler)
@@ -712,7 +710,7 @@ class SomaticTrainerHomeWindow(Frame):
                                     self.change_count_since_last_save = 0
 
                             self.reload_glyph_picker()
-                            self.reload_example_list()
+                            self.insert_thumbnail_button_for(new_gesture)
                             self.thumbnail_canvas.yview_moveto(1)
 
                         else:
