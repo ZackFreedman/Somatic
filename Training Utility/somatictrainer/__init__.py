@@ -3,7 +3,7 @@ import tkinter
 import logging
 import somatictrainer.app
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 
 def log_error(*args):

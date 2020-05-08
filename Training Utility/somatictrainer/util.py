@@ -5,7 +5,7 @@ import numpy as np
 import quaternion
 from scipy.interpolate import interp1d
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 
 def lookRotation(forward, up):

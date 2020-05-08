@@ -1,17 +1,18 @@
 /*************
- * Somatic data glove firmware
- * by Zack Freedman of Voidstar Lab
- * (c) Voidstar Lab 2019
- * Somatic is licensed Creative Commons 4.0 Attribution Non-Commercial
- * 
- * Uses code by Paul Joffressen, Kris Winer, and the Arduino project
- * 
- * Deploy to Teensy 4.0 at max clock speed
- */
+   Somatic data glove firmware
+   by Zack Freedman of Voidstar Lab
+   (c) Voidstar Lab 2019
+   Somatic is licensed Creative Commons 4.0 Attribution Non-Commercial
+
+   Uses code by Paul Joffressen, Kris Winer, and the Arduino project
+
+   Deploy to Teensy 4.0 at max clock speed
+*/
 
 // The following dumb bullshit just lets us turn off serial debug
-//#define DEBUG
+#define DEBUG
 #define GET_MACRO(_1, _2, NAME, ...) NAME
+
 #ifdef DEBUG
 #define debug_print_formatted(x, y) Serial.print(x,y)
 #define debug_print_noformat(x) Serial.print(x)
@@ -25,12 +26,15 @@
 #define debug_println_noformat(x)
 #define debug_write(x)
 #endif
+
 #define debug_print(...) GET_MACRO(__VA_ARGS__, debug_print_formatted, debug_print_noformat)(__VA_ARGS__)
 #define debug_println(...) GET_MACRO(__VA_ARGS__, debug_println_formatted, debug_println_noformat)(__VA_ARGS__)
-
 #define sanity(x) debug_println("Sanity " #x)
 
-#define bt Serial
+// #define debug_angular_velocity
+#define debug_dump_bt_rx
+
+#define bt Serial1
 
 // End dumb debugging bullshit
 
@@ -39,6 +43,7 @@
 
 unsigned long fingerDebounce = 100;
 
+const byte btRtsPin = 2;
 const byte vibePin = 23;
 const byte fingerSwitchPins[] = {9, 10, 11, 12};
 bool lastFingerPositions[4];
@@ -46,9 +51,9 @@ unsigned long lastFingerStableTimestamps[4];
 
 float lastBearing[3];
 
-const float velocityThresholdToBegin = 2. / 1000000.;  // In rad/microsecond
-const float velocityThresholdToEnd = 1 / 1000000.;  // Also in rad/microsecond
-const int historyLength = 5;
+const float velocityThresholdToBegin = 4. / 1000000.;  // In rad/microsecond
+const float velocityThresholdToEnd = 2. / 1000000.;  // Also in rad/microsecond
+const int historyLength = 10;
 float angularVelocityWindow[historyLength];
 
 float bearingAtLastBuzz[2];
@@ -63,11 +68,22 @@ unsigned long lastTimestamp;
 
 IMU imu = IMU();
 
+elapsedMillis timeSinceLastDebugCommandChar;
+#define commandLockout 10000
+
+bool isFrozen = false;
+elapsedMillis timeSinceFreeze;
+#define freezeTime 2000
+
+char outgoingPacket[100];
+
 void setup() {
   Serial.begin(115200);
-  bt.begin(115200);
+  bt.begin(57600);
 
   analogWriteFrequency(vibePin, 93750);  // Set to high frequency so switching noise is inaudible
+
+  pinMode(btRtsPin, INPUT);
 
   // Some butt-head didn't leave room for i2c pullups on the lil board.
   // Using adjacent pins as makeshift 3V3 sources :|
@@ -97,15 +113,33 @@ void loop() {
     analogWrite(vibePin, 0);
   }
 
-  if (bt.available() >= 5) {
-    for (int i = 0; i < bt.available(); i++) {
-      if (bt.read() == '>'
+  while (Serial.available()) {
+    int incoming = Serial.read();
+    //    Serial.write(incoming);
+    bt.write(incoming);
+
+    timeSinceLastDebugCommandChar = 0;
+  }
+
+  while (bt.available()) {
+    if (bt.peek() == '>') {
+      if (bt.available() >= 5
+          && bt.read() == '>'
           && bt.read() == 'A'
           && bt.read() == 'T'
           && bt.read() == '\r'
           && bt.read() == '\n') {
-        bt.println(">OK");
+        debug_println("Got AT - request to acknowledge");
+        bt.print(">OK\n");
       }
+      else break;
+    }
+    else {
+#ifdef debug_dump_bt_rx
+      if (timeSinceLastDebugCommandChar < commandLockout)
+        timeSinceLastDebugCommandChar = 0;
+      Serial.write(bt.read());
+#endif
     }
   }
 
@@ -116,10 +150,13 @@ void loop() {
 
     theta = asin(norm(lastBearing[0], lastBearing[1], imu.Quat[0], imu.Quat[1]));
     float angularVelocity = theta / sampleRate;
+
+#ifdef debug_angular_velocity
     debug_print("Theta: ");
     debug_println(theta);
     debug_print("Angular velocity (per sec): ");
     debug_println(angularVelocity * 1000000.);
+#endif
 
     for (int i = historyLength - 2; i >= 0; i--) {
       angularVelocityWindow[i + 1] = angularVelocityWindow[i];
@@ -127,12 +164,8 @@ void loop() {
 
     angularVelocityWindow[0] = angularVelocity;
 
-    //  Serial.println(imu.algorithmStatus, BIN);
-
     //   Packet format:
     //   >[./|],[./|],[./|],[./|],[float h],[float p],[float r],[float accel x],[accel y],[accel z],[us since last sample]
-
-    bt.print('>');
 
     for (int i = 0; i < 4; i++) {
       bool fingerPosition = digitalRead(fingerSwitchPins[i]);
@@ -143,9 +176,6 @@ void loop() {
         lastFingerPositions[i] = fingerPosition;
         lastFingerStableTimestamps[i] = millis();
       }
-
-      bt.print(lastFingerPositions[i] ? '.' : '|');
-      bt.print(',');
     }
 
     bool handIsMoving = false;
@@ -180,26 +210,107 @@ void loop() {
       bearingAtLastBuzz[1] = imu.Quat[1];
     }
 
-    bt.print(imu.Quat[0] * -1, 4);
-    bt.print(',');
+    if (timeSinceLastDebugCommandChar >= commandLockout) {
+      if (!digitalRead(btRtsPin)) {
+        for (int i = 0; i < 100; i++) outgoingPacket[i] = 0;
 
-    bt.print(imu.Quat[1], 4);
-    bt.print(',');
+        outgoingPacket[0] = '>';
 
-    bt.print(imu.Quat[2], 4);
-    bt.print(',');
+        if (lastFingerPositions[0]) outgoingPacket[1] = '.';
+        else outgoingPacket[1] = '|';
+        outgoingPacket[2] = ',';
 
-    bt.print(imu.ax, 4);
-    bt.print(',');
+        if (lastFingerPositions[1]) outgoingPacket[3] = '.';
+        else outgoingPacket[3] = '|';
+        outgoingPacket[4] = ',';
 
-    bt.print(imu.ay, 4);
-    bt.print(',');
+        if (lastFingerPositions[2]) outgoingPacket[5] = '.';
+        else outgoingPacket[5] = '|';
+        outgoingPacket[6] = ',';
 
-    bt.print(imu.az, 4);
-    bt.print(',');
+        if (lastFingerPositions[3]) outgoingPacket[7] = '.';
+        else outgoingPacket[7] = '|';
+        outgoingPacket[8] = ',';
 
-    // Not sure if this is where the delta should be calculated
-    bt.println(sampleRate);
+        //      bt.print('>');
+        //      bt.print(lastFingerPositions[0] ? '.' : '|');
+        //      bt.print(',');
+        //      bt.print(lastFingerPositions[1] ? '.' : '|');
+        //      bt.print(',');
+        //      bt.print(lastFingerPositions[2] ? '.' : '|');
+        //      bt.print(',');
+        //      bt.print(lastFingerPositions[3] ? '.' : '|');
+        //      bt.print(',');
+
+        dtostrf(imu.Quat[0] * -1, 6, 4, &outgoingPacket[strlen(outgoingPacket)]);
+        outgoingPacket[strlen(outgoingPacket)] = ',';
+
+        dtostrf(imu.Quat[1], 6, 4, &outgoingPacket[strlen(outgoingPacket)]);
+        outgoingPacket[strlen(outgoingPacket)] = ',';
+
+        dtostrf(imu.Quat[2], 6, 4, &outgoingPacket[strlen(outgoingPacket)]);
+        outgoingPacket[strlen(outgoingPacket)] = ',';
+
+        //      bt.print(imu.Quat[0] * -1, 4);
+        //      bt.print(',');
+        //
+        //      bt.print(imu.Quat[1], 4);
+        //      bt.print(',');
+        //
+        //      bt.print(imu.Quat[2], 4);
+        //      bt.print(',');
+
+        dtostrf(imu.ax, 7, 4, &outgoingPacket[strlen(outgoingPacket)]);
+        outgoingPacket[strlen(outgoingPacket)] = ',';
+
+        dtostrf(imu.ay, 7, 4, &outgoingPacket[strlen(outgoingPacket)]);
+        outgoingPacket[strlen(outgoingPacket)] = ',';
+
+        dtostrf(imu.az, 7, 4, &outgoingPacket[strlen(outgoingPacket)]);
+        outgoingPacket[strlen(outgoingPacket)] = ',';
+
+        //      bt.print(imu.ax, 4);
+        //      bt.print(',');
+        //
+        //      bt.print(imu.ay, 4);
+        //      bt.print(',');
+        //
+        //      bt.print(imu.az, 4);
+        //      bt.print(',');
+
+        itoa(sampleRate, &outgoingPacket[strlen(outgoingPacket)], 10);
+        outgoingPacket[strlen(outgoingPacket)] = '\n';
+
+        //      bt.println(sampleRate);
+
+        for (int i = 0; i < strlen(outgoingPacket); i++) {
+          if (digitalRead(btRtsPin)) {
+            debug_println("Agh! RTS! Abandon ship!");
+            break;
+          }
+          else bt.print(outgoingPacket[i]);
+        }
+
+        if (isFrozen) {
+          debug_println("Back to normal");
+          isFrozen = false;
+        }
+      }
+      else {
+        if (!isFrozen) {
+          debug_println("BOO! RTS! Can't send");
+          timeSinceFreeze = 0;
+          isFrozen = true;
+        }
+        else {
+          if (timeSinceFreeze >= freezeTime) {
+            debug_println("Kicking the module");
+            bt.print('\n');
+            timeSinceFreeze = 0;
+          }
+        }
+      }
+    }
 
     lastTimestamp = timestamp;
     lastBearing[0] = imu.Quat[0];
@@ -238,7 +349,6 @@ float wrappedDelta(float oldValue, float newValue) {
 }
 
 void buzzFor(unsigned int strength, unsigned long duration) {
-  debug_println("Buzz!");
   analogWrite(vibePin, strength);
   timeSinceBuzzStarted = 0;
   currentBuzzDuration = duration;

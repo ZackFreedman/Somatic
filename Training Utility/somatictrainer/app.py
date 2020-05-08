@@ -4,10 +4,9 @@ from tkinter import messagebox, filedialog, ttk, font
 import serial
 from serial import Serial, SerialException
 from serial.tools.list_ports import comports
-import logging
-import numpy as np
-import quaternion
 import threading
+import logging
+import time
 from queue import Queue, Empty
 from collections import deque
 import json
@@ -18,8 +17,6 @@ import tensorflow.keras as keras
 from copy import deepcopy
 from somatictrainer.util import *
 from somatictrainer.gestures import Gesture, GestureTrainingSet, standard_gesture_length
-
-logging.basicConfig(level=logging.INFO)
 
 
 class SomaticTrainerHomeWindow(Frame):
@@ -42,6 +39,9 @@ class SomaticTrainerHomeWindow(Frame):
         Frame.__init__(self, master)
         self.master = master
 
+        self.logger = logging.getLogger('HomeWindow')
+        self.logger.setLevel(logging.INFO)
+
         hand_icon_directory = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'Hands')
 
         unknown_hand_icon_bitmap = Image.open(os.path.join(hand_icon_directory, 'Unknown.png'))
@@ -62,9 +62,11 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.state = self.State.disconnected
 
+        self.serial_sniffing_thread = None
+        self.sample_handling_thread = None
+
         self.queue = Queue()
         self.port = None
-        self.serial_sniffing_thread = None
         self.receiving = False
         self.last_hand_id = -1
 
@@ -80,9 +82,10 @@ class SomaticTrainerHomeWindow(Frame):
         self.raw_data_buffer = []
         self.current_gesture_duration = 0
 
+        self.samples_to_handle = []
         self.bearing_zero = None
         self.last_unprocessed_bearing_received = None
-        self.angular_velocity_window = deque(maxlen=5)
+        self.angular_velocity_window = deque(maxlen=10)
         self.starting_velocity_estimation_buffer = deque(maxlen=10)
         self.last_coordinate_visualized = None
 
@@ -150,6 +153,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.thumbnail_canvas.configure(yscrollcommand=self.thumbnail_scrollbar.set)
         self.thumbnail_scrollbar.config(command=self.thumbnail_canvas.yview)
+        self.thumbnail_canvas.config(yscrollcommand=self.thumbnail_scrollbar.set)
 
         def bind_wheel_to_thumbnails(event):
             self.thumbnail_canvas.bind_all('<MouseWheel>', on_wheel_scroll)
@@ -186,8 +190,8 @@ class SomaticTrainerHomeWindow(Frame):
         self.grid_rowconfigure(0, weight=1)
 
         # Debug code!
-        # self.model = keras.models.load_model(
-        #     'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\2020-05-01T13-19.h5')
+        self.model = keras.models.load_model(
+            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\2020-05-07T21-57.h5')
 
     def save_state(self):
         datastore = {'port': self.port.port if self.port is not None and self.port.isOpen() else None,
@@ -200,26 +204,32 @@ class SomaticTrainerHomeWindow(Frame):
 
     def restore_state(self):
         if not os.path.isfile(os.getcwd() + 'config.json'):
-            logging.warning('No saved configuration, starting fresh')
+            self.logger.warning('No saved configuration, starting fresh')
             return
 
         with open(os.getcwd() + 'config.json', 'r') as f:
             datastore = json.load(f)
 
             if 'version' not in datastore or datastore['version'] != self._config_file_version:
-                logging.warning('Saved config is outdated, not loading')
+                self.logger.warning('Saved config is outdated, not loading')
                 return
 
             if 'wip' in datastore:
-                self.open_file(datastore['wip'])
-                logging.info('Re-opening work-in-progress file {}'.format(datastore['wip']))
+                self.logger.info('Re-opening work-in-progress file {}'.format(datastore['wip']))
 
-                try:
-                    if 'selected-glyph' in datastore and datastore['selected-glyph']:
-                        self.glyph_picker.selection_set(datastore['selected-glyph'])
-                        logging.info('Resuming with glyph {} selected'.format(datastore['selected-glyph']))
-                except TclError:
-                    logging.warning("Couldn't select glyph {} - it doesn't exist?".format(datastore['selected-glyph']))
+                if self.open_file(datastore['wip']):
+                    try:
+                        if 'selected-glyph' in datastore and datastore['selected-glyph']:
+                            selected_item = datastore['selected-glyph']
+                            if selected_item is not None:
+                                self.glyph_picker.focus(selected_item)
+                                self.glyph_picker.selection_set(selected_item)
+                                self.glyph_picker.see(selected_item)
+                            self.logger.info('Resuming with glyph {} selected'.format(datastore['selected-glyph']))
+                    except TclError:
+                        self.logger.warning("Couldn't select glyph {} - it doesn't exist?".format(datastore['selected-glyph']))
+                else:
+                    self.logger.warning("Couldn't reopen file - doesn't exist?")
 
             if 'port' in datastore and datastore['port']:
                 port_names = [port.device for port in comports()]
@@ -227,9 +237,9 @@ class SomaticTrainerHomeWindow(Frame):
                 if datastore['port'] in port_names:
                     self.disconnect()
                     self.connect_to(datastore['port'])
-                    logging.info('Reconnected to glove on {}'.format(datastore['port']))
+                    self.logger.info('Reconnected to glove on {}'.format(datastore['port']))
                 else:
-                    logging.info("Couldn't reconnect to port {}".format(datastore['port']))
+                    self.logger.info("Couldn't reconnect to port {}".format(datastore['port']))
 
     def reload_glyph_picker(self):
         scroll_position = self.glyph_picker.yview()[0]
@@ -265,10 +275,12 @@ class SomaticTrainerHomeWindow(Frame):
         for example in self.training_set.get_examples_for(selected_glyph):
             self.insert_thumbnail_button_for(example)
 
+        self.thumbnail_canvas.yview_moveto(0)
+
     def insert_thumbnail_button_for(self, example):
         for button in self.thumbnail_buttons:
             if button.gesture == example:
-                logging.debug('Already placed button for example w/ UUID {}'.format(example.uuid))
+                self.logger.debug('Already placed button for example w/ UUID {}'.format(example.uuid))
                 return
 
         if example in self.example_thumbnails:
@@ -293,8 +305,12 @@ class SomaticTrainerHomeWindow(Frame):
         position = len(self.thumbnail_buttons) - 1
         button.grid(row=int(position / 5), column=int(position % 5))
 
+        if len(self.thumbnail_buttons) == 1:
+            # This is the first thumbnail in the list - the scrollbar won't readjust automatically.
+            self.thumbnail_canvas.yview_moveto(0)
+
     def delete_thumbnail_button(self, button):
-        logging.info('Removing example for {}, UUID {}'.format(
+        self.logger.info('Removing example for {}, UUID {}'.format(
             button.gesture.glyph, str(button.gesture.uuid)))
         self.training_set.remove(button.gesture)
 
@@ -347,7 +363,42 @@ class SomaticTrainerHomeWindow(Frame):
             if command['type'] is 'ack':
                 if self.state is self.State.connecting:
                     self.state = self.State.connected
-                    logging.info('Got ack - connected')
+                    self.logger.info('Got ack - connected')
+
+            if command['type'] is 'viz':
+                self.logger.debug('Starting to visualize')
+
+                path = command['path']
+
+                self.path_display.delete(ALL)
+
+                last_point = None
+
+                x_center = (max(path[:, 0] - min(path[:, 0]))) / 2
+                y_center = (max(path[:, 1] - min(path[:, 1]))) / 2
+
+                padding = 10
+
+                for i, coords in enumerate(path):
+                    x_coord = (coords[0] + 0.5 - x_center) * (250 - padding * 2) + padding
+                    y_coord = (coords[1] + 0.5 - y_center) * (250 - padding * 2) + padding
+
+                    if last_point:
+                        green = int(_scale(i, 0, len(path), 255, 0))
+                        blue = int(_scale(i, 0, len(path), 0, 255))
+
+                        self.path_display.create_line(last_point[0],
+                                                      last_point[1],
+                                                      x_coord, y_coord,
+                                                      width=2,
+                                                      fill='#00{:02X}{:02X}'.format(green, blue))
+
+                    last_point = [x_coord, y_coord]
+
+                    self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
+                                                  fill='SeaGreen1')
+
+                self.logger.debug('Visualized')
 
             if command['type'] is 'rx':
                 bearing = command['bearing']
@@ -364,18 +415,22 @@ class SomaticTrainerHomeWindow(Frame):
                     x_coord = np.tan(bearing[0]) * 250
                     y_coord = np.tan(bearing[1]) * 250
 
-                    logging.debug('Rendering ({}, {})'.format(x_coord, y_coord))
+                    if 0 <= x_coord <= 250 and 0 <= y_coord <= 250:
+                        self.logger.debug('Rendering ({}, {})'.format(x_coord, y_coord))
 
-                    if self.last_coordinate_visualized:
-                        self.path_display.create_line(self.last_coordinate_visualized[0],
-                                                      self.last_coordinate_visualized[1],
-                                                      x_coord, y_coord,
-                                                      width=2, fill='blue')
+                        if self.last_coordinate_visualized:
+                            self.path_display.create_line(self.last_coordinate_visualized[0],
+                                                          self.last_coordinate_visualized[1],
+                                                          x_coord, y_coord,
+                                                          width=2, fill='blue')
 
-                    self.last_coordinate_visualized = [x_coord, y_coord]
+                        self.last_coordinate_visualized = [x_coord, y_coord]
 
-                    self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
-                                                  fill='SeaGreen1')
+                        self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
+                                                      fill='SeaGreen1')
+                    else:
+                        self.logger.debug('Coordinate ({}, {}) invalid - leftover from before gesture?'
+                                          .format(x_coord, y_coord))
 
             if command['type'] is 'quit':
                 self.master.destroy()
@@ -422,7 +477,7 @@ class SomaticTrainerHomeWindow(Frame):
                                                       filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
 
         if not os.path.isfile(file_to_open):
-            logging.warning("Can't open training file because it doesn't exist - {}".format(file_to_open))
+            self.logger.warning("Can't open training file because it doesn't exist - {}".format(file_to_open))
             return
 
         if file_to_open:
@@ -435,10 +490,12 @@ class SomaticTrainerHomeWindow(Frame):
                 self.file_menu.entryconfigure('Save', state=NORMAL)
                 self.file_menu.entryconfigure('Save as...', state=NORMAL)
                 self.file_name_label.configure(text=self.open_file_pathspec, anchor=E)
+                return True
             except (KeyError, AttributeError, json.decoder.JSONDecodeError) as e:
-                logging.exception('Oopsie')
+                self.logger.exception('Oopsie')
                 messagebox.showerror("Can't load file",
                                      "This file can't be loaded.\nError: {}".format(repr(e)))
+                return False
 
     def save_file(self):
         if self.state is self.State.recording:
@@ -446,7 +503,7 @@ class SomaticTrainerHomeWindow(Frame):
             self.cancel_gesture()
 
         if not self.training_set:
-            logging.warning('Tried to save empty training set?')
+            self.logger.warning('Tried to save empty training set?')
             return
 
         if not self.open_file_pathspec:
@@ -459,6 +516,8 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.training_set.save(self.open_file_pathspec)
 
+        self.logger.info('Saved {}'.format(self.open_file_pathspec))
+
         self.open_file_has_been_modified = False
         self.change_count_since_last_save = 0
 
@@ -468,7 +527,7 @@ class SomaticTrainerHomeWindow(Frame):
             self.cancel_gesture()
 
         if not self.training_set:
-            logging.warning('Tried to save empty training set?')
+            self.logger.warning('Tried to save empty training set?')
             return
 
         file_to_create = filedialog.asksaveasfilename(title='Save training data',
@@ -516,28 +575,29 @@ class SomaticTrainerHomeWindow(Frame):
             self.port.write(bytes('>AT\r\n'.encode('utf-8')))
             self.start_receiving()
 
-        except SerialException:
-            logging.exception('dafuq')
-            messagebox.showinfo("Can't open port", 'Port already opened by another process')
+        except SerialException as e:
+            self.logger.exception('dafuq')
+            error_tokens = [x.strip("' ") for x in e.args[0].split('(')[1].split(',')]
+            messagebox.showinfo("Can't open {}".format(portspec), 'Error {}: {}'.format(error_tokens[0], error_tokens[1]))
             self.state = self.State.disconnected
-            self.status_line.configure(text="Can't connect to {}", bg='firebrick1'.format(portspec))
+            self.status_line.configure(text="Can't connect to {}".format(portspec), bg='firebrick1')
             self.port = None
 
     def disconnect(self):
         if self.port:
-            logging.info('Now disconnecting')
+            self.logger.info('Now disconnecting')
 
             if self.receiving:
                 self.receiving = False
                 if threading.current_thread() is not self.serial_sniffing_thread \
                         and self.serial_sniffing_thread \
                         and self.serial_sniffing_thread.is_alive():
-                    logging.info('Quitting receive')
+                    self.logger.info('Quitting receive')
                     self.serial_sniffing_thread.join(timeout=1)
-                    logging.info('No longer receiving')
+                    self.logger.info('No longer receiving')
 
             if self.port.isOpen():
-                logging.info('Port closed')
+                self.logger.info('Port closed')
                 self.port.close()
                 self.port = None
                 # self.serial_connect_button.configure(text='Connect')
@@ -550,14 +610,13 @@ class SomaticTrainerHomeWindow(Frame):
 
     def start_receiving(self):
         if self.receiving:
-            logging.warning('Already receiving, not doing it')
+            self.logger.warning('Already receiving, not doing it')
             return
 
         self.receiving = True
-        logging.info('Now receiving')
+        self.logger.info('Now receiving')
 
-        self.serial_sniffing_thread = threading.Thread(target=self.handle_packets)
-        self.serial_sniffing_thread.isDaemon()
+        self.serial_sniffing_thread = threading.Thread(target=self.handle_packets, daemon=True)
         self.serial_sniffing_thread.start()
 
     def handle_packets(self):
@@ -565,12 +624,12 @@ class SomaticTrainerHomeWindow(Frame):
             try:
                 incoming = self.port.readline().decode()
             except SerialException:
-                logging.exception('Lost serial connection, bailing out')
+                self.logger.exception('Lost serial connection, bailing out')
                 self.disconnect()
                 return
 
             if incoming:
-                logging.debug('Received packet {}'.format(incoming))
+                self.logger.debug('Received packet {}'.format(incoming))
 
                 # Packet format:
                 # >[./|],[./|],[./|],[./|],
@@ -578,35 +637,52 @@ class SomaticTrainerHomeWindow(Frame):
                 # [float a.x], [float a.y], [float a.z], [us since last sample]
 
                 if incoming.count('>') is not 1:
-                    logging.debug('Packet corrupt - missing delimeter(s)')
+                    self.logger.debug('Packet corrupt - missing delimeter(s)')
                     continue
 
                 # Strip crap that arrived before the delimeter, and also the delimiter itself
                 incoming = incoming[incoming.index('>') + 1:].rstrip()
 
                 if incoming == 'OK':
-                    logging.info('Received ack')
+                    self.logger.info('Received ack')
                     self.queue.put({'type': 'ack'})
                     continue
 
                 if incoming.count(',') is not 10:
-                    logging.debug('Packet corrupt - insufficient fields')
+                    self.logger.debug('Packet corrupt - insufficient fields')
                     continue
 
                 tokens = incoming.split(',')
-                logging.debug('Tokens: {0}'.format(tokens))
+                self.logger.debug('Tokens: {0}'.format(tokens))
 
                 fingers = list(map(lambda i: i is '.', tokens[:4]))
-                logging.debug('Fingers: {0}'.format(fingers))
+                self.logger.debug('Fingers: {0}'.format(fingers))
 
                 bearing = np.array([float(t) for t in tokens[4:7]])
                 acceleration = np.array([float(t) for t in tokens[7:10]])
 
                 microseconds = float(tokens[-1])
 
-                logging.debug('Sample parsed')
+                self.logger.debug('Sample parsed')
 
-                self.handle_sample(fingers, bearing, acceleration, microseconds)
+                self.accept_sample(fingers, bearing, acceleration, microseconds)
+
+            else:
+                time.sleep(0.05)
+
+    def accept_sample(self, *args):
+        self.samples_to_handle.append(args)
+
+        if not self.sample_handling_thread or not self.sample_handling_thread.is_alive():
+            self.sample_handling_thread = threading.Thread(target=self.sample_handling_loop, daemon=True)
+            self.sample_handling_thread.start()
+
+    def sample_handling_loop(self):
+        while len(self.samples_to_handle):
+            fingers, bearing, acceleration, microseconds = self.samples_to_handle[0]
+            del self.samples_to_handle[0]
+            self.handle_sample(fingers, bearing, acceleration, microseconds)
+            time.sleep(0)
 
     def handle_sample(self, fingers, bearing, acceleration, microseconds):
         """
@@ -630,9 +706,9 @@ class SomaticTrainerHomeWindow(Frame):
             y, p = bearing_delta(self.last_unprocessed_bearing_received, bearing)
             norm = np.sqrt(sum(np.square([abs(y), abs(p)])))
 
-            logging.debug(
+            self.logger.debug(
                 'Last: {} Counter: {} Delta: {}'.format(self.last_unprocessed_bearing_received, bearing, [y, p]))
-            logging.debug('Norm: {}'.format(norm))
+            self.logger.debug('Norm: {}'.format(norm))
 
             if norm:
                 theta = np.arcsin(norm)
@@ -644,11 +720,11 @@ class SomaticTrainerHomeWindow(Frame):
             self.angular_velocity_window.append(angular_velocity)
 
             in_degrees = angular_velocity * 180 / np.pi
-            logging.debug('Angular velocity {0:.2f} deg or {1:.2f} rad/s'.format(in_degrees, angular_velocity))
+            self.logger.debug('Angular velocity {0:.2f} deg or {1:.2f} rad/s'.format(in_degrees, angular_velocity))
 
         self.last_unprocessed_bearing_received = bearing
 
-        velocity_threshold = .5 if self.state is self.State.recording else 2
+        velocity_threshold = 2 if self.state is self.State.recording else 4
 
         gesture_eligible = (len([x for x in self.angular_velocity_window if x > velocity_threshold])
                             and (fingers == self.pointer_gesture or self.state is self.State.recording))
@@ -670,7 +746,7 @@ class SomaticTrainerHomeWindow(Frame):
                 self.path_display.delete(ALL)
                 self.last_coordinate_visualized = None
 
-                logging.info('Starting sample!')
+                self.logger.info('Starting sample!')
                 self.status_line.configure(bg='SeaGreen1')
 
                 self.bearing_zero = bearing
@@ -688,7 +764,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         else:
             if self.state is self.State.recording:
-                logging.info('Sample done, {} points'.format(len(self.gesture_buffer)))
+                self.logger.info('Sample done, {} points'.format(len(self.gesture_buffer)))
                 self.status_line.configure(bg='OliveDrab1')
 
                 def flash_red():
@@ -709,25 +785,10 @@ class SomaticTrainerHomeWindow(Frame):
 
                     self.visualize(processed_bearings)
                 except AttributeError:
-                    logging.info("Couldn't create gesture")
+                    self.logger.exception("Couldn't create gesture")
                     new_gesture = None
 
                 if new_gesture and len(self.glyph_picker.selection()) is 0:
-                    # # Debug Code!
-                    # daters = new_gesture.bearings
-                    # print(daters)
-                    #
-                    # results = self.model.predict(daters.reshape(1, standard_gesture_length, 2))
-                    # results = sorted([[chr(ord('a') + i), j] for i, j in enumerate(results[0])],
-                    #                  key=lambda item: item[1], reverse=True)
-                    #
-                    # for index, value in results[:2]:
-                    #     print('{}: {:.0f}'.format(index, value * 100))
-                    #
-                    # if self.current_gesture_duration > 300000:
-                    #     self.path_display.create_text((125, 125), text=results[0][0],
-                    #                                   font=font.Font(family='Comic Sans', size=200))
-
                     overlay_text('Discarding - no glyph selected')
 
                     if self.current_gesture_duration > 300000:
@@ -735,6 +796,21 @@ class SomaticTrainerHomeWindow(Frame):
                     else:
                         flash_red()
                 elif new_gesture:
+                    # Debug Code!
+                    daters = new_gesture.bearings
+                    print(daters)
+
+                    results = self.model.predict(daters.reshape(1, standard_gesture_length, 2))
+                    results = sorted([[chr(ord('a') + i), j] for i, j in enumerate(results[0])],
+                                     key=lambda item: item[1], reverse=True)
+
+                    for index, value in results[:2]:
+                        print('{}: {:.0f}'.format(index, value * 100))
+
+                    if self.current_gesture_duration > 300000:
+                        self.path_display.create_text((125, 125), text=results[0][0],
+                                                      font=font.Font(family='Comic Sans', size=200))
+
                     selected_glyph = self.glyph_picker.selection()[0]
                     short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
 
@@ -809,32 +885,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.last_coordinate_visualized = None
 
     def visualize(self, path):
-        self.path_display.delete(ALL)
-
-        last_point = None
-
-        x_center = (max(path[:, 0] - min(path[:, 0]))) / 2
-        y_center = (max(path[:, 1] - min(path[:, 1]))) / 2
-
-        padding = 10
-
-        for i, coords in enumerate(path):
-            x_coord = (coords[0] + 0.5 - x_center) * (250 - padding * 2) + padding
-            y_coord = (coords[1] + 0.5 - y_center) * (250 - padding * 2) + padding
-
-            if last_point:
-                green = int(_scale(i, 0, len(path), 255, 0))
-                blue = int(_scale(i, 0, len(path), 0, 255))
-
-                self.path_display.create_line(last_point[0],
-                                              last_point[1],
-                                              x_coord, y_coord,
-                                              width=2,
-                                              fill='#00{:02X}{:02X}'.format(green, blue))
-
-            last_point = [x_coord, y_coord]
-
-            self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2), fill='SeaGreen1')
+        self.queue.put({'type': 'viz', 'path': path})
 
 
 def _scale(x, in_min, in_max, out_min, out_max):
