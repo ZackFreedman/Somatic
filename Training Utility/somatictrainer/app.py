@@ -41,6 +41,10 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.logger = logging.getLogger('HomeWindow')
         self.logger.setLevel(logging.INFO)
+        self._log_parsing = False
+        self._log_angular_velocity = False
+
+        self.gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
 
         hand_icon_directory = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'Hands')
 
@@ -191,7 +195,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         # Debug code!
         self.model = keras.models.load_model(
-            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\2020-05-07T21-57.h5')
+            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\simple_model.h5')
 
     def save_state(self):
         datastore = {'port': self.port.port if self.port is not None and self.port.isOpen() else None,
@@ -339,6 +343,7 @@ class SomaticTrainerHomeWindow(Frame):
     def start(self):
         self.master.after(10, self.queue_handler)
         self.restore_state()
+        self.logger.debug('Gesture cone angle: {:.5f}'.format(self.gesture_cone_angle))# TODO cut this
 
     def stop(self):
         if self.open_file_has_been_modified:
@@ -366,8 +371,6 @@ class SomaticTrainerHomeWindow(Frame):
                     self.logger.info('Got ack - connected')
 
             if command['type'] is 'viz':
-                self.logger.debug('Starting to visualize')
-
                 path = command['path']
 
                 self.path_display.delete(ALL)
@@ -398,8 +401,6 @@ class SomaticTrainerHomeWindow(Frame):
                     self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
                                                   fill='SeaGreen1')
 
-                self.logger.debug('Visualized')
-
             if command['type'] is 'rx':
                 bearing = command['bearing']
                 if self.state is not self.State.disconnected and self.state is not self.State.quitting:
@@ -416,7 +417,7 @@ class SomaticTrainerHomeWindow(Frame):
                     y_coord = np.tan(bearing[1]) * 250
 
                     if 0 <= x_coord <= 250 and 0 <= y_coord <= 250:
-                        self.logger.debug('Rendering ({}, {})'.format(x_coord, y_coord))
+                        # self.logger.debug('Rendering ({}, {})'.format(x_coord, y_coord))
 
                         if self.last_coordinate_visualized:
                             self.path_display.create_line(self.last_coordinate_visualized[0],
@@ -629,7 +630,8 @@ class SomaticTrainerHomeWindow(Frame):
                 return
 
             if incoming:
-                self.logger.debug('Received packet {}'.format(incoming))
+                if self._log_parsing:
+                    self.logger.debug('Received packet {}'.format(incoming))
 
                 # Packet format:
                 # >[./|],[./|],[./|],[./|],
@@ -637,7 +639,8 @@ class SomaticTrainerHomeWindow(Frame):
                 # [float a.x], [float a.y], [float a.z], [us since last sample]
 
                 if incoming.count('>') is not 1:
-                    self.logger.debug('Packet corrupt - missing delimeter(s)')
+                    if self._log_parsing:
+                        self.logger.debug('Packet corrupt - missing delimeter(s)')
                     continue
 
                 # Strip crap that arrived before the delimeter, and also the delimiter itself
@@ -649,21 +652,25 @@ class SomaticTrainerHomeWindow(Frame):
                     continue
 
                 if incoming.count(',') is not 10:
-                    self.logger.debug('Packet corrupt - insufficient fields')
+                    if self._log_parsing:
+                        self.logger.debug('Packet corrupt - insufficient fields')
                     continue
 
                 tokens = incoming.split(',')
-                self.logger.debug('Tokens: {0}'.format(tokens))
+                if self._log_parsing:
+                    self.logger.debug('Tokens: {0}'.format(tokens))
 
                 fingers = list(map(lambda i: i is '.', tokens[:4]))
-                self.logger.debug('Fingers: {0}'.format(fingers))
+                if self._log_parsing:
+                    self.logger.debug('Fingers: {0}'.format(fingers))
 
                 bearing = np.array([float(t) for t in tokens[4:7]])
                 acceleration = np.array([float(t) for t in tokens[7:10]])
 
                 microseconds = float(tokens[-1])
 
-                self.logger.debug('Sample parsed')
+                if self._log_parsing:
+                    self.logger.debug('Sample parsed')
 
                 self.accept_sample(fingers, bearing, acceleration, microseconds)
 
@@ -706,9 +713,10 @@ class SomaticTrainerHomeWindow(Frame):
             y, p = bearing_delta(self.last_unprocessed_bearing_received, bearing)
             norm = np.sqrt(sum(np.square([abs(y), abs(p)])))
 
-            self.logger.debug(
-                'Last: {} Counter: {} Delta: {}'.format(self.last_unprocessed_bearing_received, bearing, [y, p]))
-            self.logger.debug('Norm: {}'.format(norm))
+            if self._log_angular_velocity:
+                self.logger.debug(
+                    'Last: {} Counter: {} Delta: {}'.format(self.last_unprocessed_bearing_received, bearing, [y, p]))
+                self.logger.debug('Norm: {}'.format(norm))
 
             if norm:
                 theta = np.arcsin(norm)
@@ -720,7 +728,9 @@ class SomaticTrainerHomeWindow(Frame):
             self.angular_velocity_window.append(angular_velocity)
 
             in_degrees = angular_velocity * 180 / np.pi
-            self.logger.debug('Angular velocity {0:.2f} deg or {1:.2f} rad/s'.format(in_degrees, angular_velocity))
+
+            if self._log_angular_velocity:
+                self.logger.debug('Angular velocity {0:.2f} deg or {1:.2f} rad/s'.format(in_degrees, angular_velocity))
 
         self.last_unprocessed_bearing_received = bearing
 
@@ -731,15 +741,24 @@ class SomaticTrainerHomeWindow(Frame):
 
         if self.bearing_zero is not None:
             # Constrain gesture to a cone
-            gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
+            self.logger.debug('Raw bearing: ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
 
-            bearing = np.clip(bearing_delta(self.bearing_zero, bearing),
-                              -1 / 2 * gesture_cone_angle,
-                              1 / 2 * gesture_cone_angle)
+            bearing = bearing_delta(self.bearing_zero, bearing)
+            # self.logger.debug('Processed bearing 1: ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
+
+            bearing = np.clip(bearing,
+                              -1 / 2 * self.gesture_cone_angle,
+                              1 / 2 * self.gesture_cone_angle)
+            # self.logger.debug('Processed bearing 2: ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
 
             # Scale bearings to ML-ready 0.0-1.0 values
-            bearing /= gesture_cone_angle
+            bearing /= self.gesture_cone_angle
+            # self.logger.debug('Processed bearing 3: ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
+
             bearing += 0.5
+            # self.logger.debug('Processed bearing 4: ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
+
+            self.logger.debug('Processed bearing: ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
 
         if gesture_eligible:
             if self.state is not self.State.recording:
@@ -750,6 +769,7 @@ class SomaticTrainerHomeWindow(Frame):
                 self.status_line.configure(bg='SeaGreen1')
 
                 self.bearing_zero = bearing
+                self.logger.debug('Bearing zero is ({:.3f}, {:.3f})'.format(self.bearing_zero[0], self.bearing_zero[1]))
 
                 bearing = np.array([0.5, 0.5])
 
@@ -781,6 +801,9 @@ class SomaticTrainerHomeWindow(Frame):
                 try:
                     processed_bearings = process_samples(np.array(self.gesture_buffer), standard_gesture_length)
 
+                    for index, bearing in enumerate(processed_bearings):
+                        self.logger.info("Point {}: ({:.4f}, {:.2f})".format(index, bearing[0], bearing[1]))
+
                     new_gesture = Gesture('', processed_bearings, deepcopy(self.raw_data_buffer))
 
                     self.visualize(processed_bearings)
@@ -800,8 +823,10 @@ class SomaticTrainerHomeWindow(Frame):
                     daters = new_gesture.bearings
                     print(daters)
 
-                    results = self.model.predict(daters.reshape(1, standard_gesture_length, 2))
-                    results = sorted([[chr(ord('a') + i), j] for i, j in enumerate(results[0])],
+                    # results = self.model.predict(daters.reshape(1, standard_gesture_length, 2))
+                    results = self.model.predict(daters.reshape(1, standard_gesture_length * 2))
+                    # self.logger.info(len(results[0]))
+                    results = sorted([[chr(ord('A') + i), j] for i, j in enumerate(results[0])],
                                      key=lambda item: item[1], reverse=True)
 
                     for index, value in results[:2]:

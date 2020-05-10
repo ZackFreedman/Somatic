@@ -1,9 +1,6 @@
 import logging
-from typing import List, Tuple
-
 import numpy as np
 import quaternion
-from scipy.interpolate import interp1d
 
 logging.basicConfig(level=logging.INFO)
 
@@ -153,6 +150,9 @@ def process_samples(samples: np.array, desired_length):
     magnitude = np.linalg.norm([yaw_max - yaw_min, pitch_max - pitch_min])
     fudge_factor = 1 / 10
 
+    logging.debug('Yaw min: {:.3f} Pitch min: {:.3f} Yaw max: {:.3f} Pitch max: {:.3f} Trim length: {:.3f}'.format(
+        yaw_min, pitch_min, yaw_max, pitch_max, magnitude * fudge_factor))
+
     early_crap_count = 0
 
     for i in range(1, len(samples)):
@@ -160,97 +160,104 @@ def process_samples(samples: np.array, desired_length):
                            samples[i, 1] - samples[0, 1]]) > magnitude * fudge_factor:
             logging.debug('Done stripping leading points - ({:.3f}, {:.3f}) is far enough from start point '
                           '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
-                            samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
-                            magnitude * fudge_factor,
-                            np.linalg.norm([samples[i, 0] - samples[0, 0],
-                                            samples[i, 1] - samples[0, 1]])))
+                samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
+                magnitude * fudge_factor,
+                np.linalg.norm([samples[i, 0] - samples[0, 0],
+                                samples[i, 1] - samples[0, 1]])))
             break
         else:
             logging.debug('Stripping leading point ({:.3f}, {:.3f}) - too close to start point ({:.3f}, {:.3f}). '
                           'Must be {:.3f} units away, but is {:.3f}.'.format(
-                            samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
-                            magnitude * fudge_factor,
-                            np.linalg.norm([samples[i, 0] - samples[0, 0],
-                                            samples[i, 1] - samples[0, 1]])))
+                samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
+                magnitude * fudge_factor,
+                np.linalg.norm([samples[i, 0] - samples[0, 0],
+                                samples[i, 1] - samples[0, 1]])))
             early_crap_count += 1
 
     start_point = samples[0]
 
-    trimmed = samples[early_crap_count:].tolist()
+    trimmed = samples[early_crap_count + 1:].tolist()
 
     samples = np.array([start_point] + trimmed)
 
-    logging.debug('Early crap stripped: {}'.format(samples))
+    # logging.debug('Early crap stripped: {}'.format(samples))
 
     late_crap_count = 0
 
-    for i in range(1, len(samples)):
+    for i in range(2, len(samples)):
         if np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
                            samples[-i, 1] - samples[- 1, 1]]) > magnitude * fudge_factor:
             logging.debug('Done stripping trailing points - ({:.3f}, {:.3f}) is far enough from endpoint '
                           '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
-                            samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
-                            magnitude * fudge_factor,
-                            np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
-                                            samples[-i, 1] - samples[- 1, 1]])))
+                samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
+                magnitude * fudge_factor,
+                np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
+                                samples[-i, 1] - samples[- 1, 1]])))
             break
         else:
             logging.debug('Stripping trailing point ({:.3f}, {:.3f}) - too close to endpoint ({:.3f}, {:.3f}). '
                           'Must be {:.3f} units away, but is {:.3f}.'.format(
-                            samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
-                            magnitude * fudge_factor,
-                            np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
-                                            samples[-i, 1] - samples[- 1, 1]])))
+                samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
+                magnitude * fudge_factor,
+                np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
+                                samples[-i, 1] - samples[- 1, 1]])))
             late_crap_count += 1
 
     if late_crap_count:
         endpoint = samples[-1]
-        trimmed = samples[:-late_crap_count - 1].tolist()
+        trimmed = samples[:(late_crap_count + 1) * -1].tolist()
         samples = np.array(trimmed + [endpoint])
 
     logging.debug('Late crap stripped: {}'.format(samples))
 
     # Standardize bearings 'curve' to evenly-spaced points
-    segment_lengths = [np.linalg.norm([samples[i, 0] - samples[i - 1, 0], samples[i, 1] - samples[i - 1, 1]])
-                       for i in range(1, len(samples))]
 
-    curve_length = sum(segment_lengths)
+    cumulative_segment_lengths = [0]
+    for index, sample in enumerate(samples):
+        if index == 0:
+            continue
 
+        segment_length = np.linalg.norm([sample[0] - samples[index - 1][0], sample[1] - samples[index - 1][1]])
+
+        cumulative_segment_lengths.append(segment_length + cumulative_segment_lengths[index - 1])
+        logging.debug('Segment ending in point {} length {:.3f} Cumul: {:.3f}'.format(
+            index, segment_length, cumulative_segment_lengths[index]))
+
+    curve_length = cumulative_segment_lengths[-1]
     target_segment_length = curve_length / (desired_length - 1)
 
-    standardized_bearings = [samples[0]]
-
-    logging.debug(
-        'Segment lengths: {} - {} segments, {} points'.format(segment_lengths, len(segment_lengths), len(samples)))
+    # logging.debug(
+    #     'Segment lengths: {} - {} segments, {} points'.format(segment_lengths, len(segment_lengths), len(samples)))
     logging.debug('Total length: {:.2f} Target segment length: {:.4f}'.format(curve_length, target_segment_length))
 
-    lower_length = 0
-    higher_length = 0
+    standardized_bearings = [samples[0]]
     first_longer_sample = 0
 
     for i in range(1, desired_length):
-        logging.debug('Looking to place a point at {:.3f} units along curve'.format(i * target_segment_length))
+        target_length = i * target_segment_length
 
-        moved_along_curve = False
+        logging.debug('Looking to place a point at {:.3f} units along curve'.format(target_length))
 
-        while higher_length < i * target_segment_length \
-                and not np.isclose(higher_length, i * target_segment_length) \
-                and not np.isclose(higher_length, curve_length):
-            lower_length = higher_length
-            higher_length = higher_length + segment_lengths[first_longer_sample]
-            first_longer_sample += 1
-            moved_along_curve = True
+        if cumulative_segment_lengths[first_longer_sample] > target_length:
+            logging.debug('Previous point at {:.3f} units along curve still works'.format(
+                cumulative_segment_lengths[first_longer_sample]))
 
-            logging.debug(
-                'Is {:.3f} enough? If so, {} is the next longest'.format(higher_length, first_longer_sample))
+        else:
+            while cumulative_segment_lengths[first_longer_sample] < target_length \
+                    and not np.isclose(cumulative_segment_lengths[first_longer_sample], target_length):
+                logging.debug(
+                    'Cumulative length of {:.3f} is too short - advancing to segment ending at point {}'.format(
+                        cumulative_segment_lengths[first_longer_sample], first_longer_sample))
+                first_longer_sample += 1
 
-        if moved_along_curve:
-            logging.debug('Previous point at {:.3f} units along curve still works'.format(higher_length))
-            logging.debug('There we go')
+                if first_longer_sample >= len(cumulative_segment_lengths):
+                    raise AttributeError("Entire line isn't long enough?!")
 
         low_point = samples[first_longer_sample - 1]
         high_point = samples[first_longer_sample]
-        position_along_segment = (i * target_segment_length - lower_length) / (higher_length - lower_length)
+        position_along_segment = ((target_length - cumulative_segment_lengths[first_longer_sample - 1]) /
+                                  (cumulative_segment_lengths[first_longer_sample]
+                                   - cumulative_segment_lengths[first_longer_sample - 1]))
 
         standardized_point_x = low_point[0] + position_along_segment * (high_point[0] - low_point[0])
         standardized_point_y = low_point[1] + position_along_segment * (high_point[1] - low_point[1])
@@ -258,9 +265,11 @@ def process_samples(samples: np.array, desired_length):
         standardized_point = [standardized_point_x, standardized_point_y]
 
         logging.debug('Placed point {:.3f} units ({:.0f}%) along the {:.3f} line between {} and {} ==> {}'
-                      .format(i * target_segment_length - lower_length,
+                      .format(target_length - cumulative_segment_lengths[first_longer_sample - 1],
                               position_along_segment * 100,
-                              higher_length - lower_length, low_point, high_point, standardized_point))
+                              cumulative_segment_lengths[first_longer_sample]
+                              - cumulative_segment_lengths[first_longer_sample - 1],
+                              low_point, high_point, standardized_point))
 
         standardized_bearings.append(standardized_point)
 

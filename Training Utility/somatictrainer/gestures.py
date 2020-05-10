@@ -28,6 +28,8 @@ class Gesture:
             raise AttributeError('Data invalid - got {} orientations instead of {}'
                                  .format(len(bearings), standard_gesture_length))
 
+        self.logger = logging.getLogger(__name__)
+
         self.bearings = bearings
         self.raw_data = raw_data
         self.glyph = glyph
@@ -64,7 +66,7 @@ class Gesture:
             return Gesture(glyph, bearings, raw_data, gesture_uuid)
 
         except (AssertionError, AttributeError, KeyError):
-            logging.exception('Error parsing dict {}...'.format(str(datastore)[:20]))
+            logging.exception('Gesture class: Error parsing dict {}...'.format(str(datastore)[:20]))
 
         return None
 
@@ -79,7 +81,10 @@ class GestureTrainingSet:
     def __init__(self):
         self.target_examples_per_glyph = 100
 
+        self.logger = logging.getLogger(__name__)
+
         self.examples = []
+        # self.unidentified_examples = []
 
     @staticmethod
     def load(pathspec):
@@ -87,20 +92,24 @@ class GestureTrainingSet:
             datastore = json.load(f)
 
             if 'version' not in datastore or datastore['version'] != GestureTrainingSet.current_version:
-                logging.warning("Saved file is outdated, not loading")
+                logging.warning("GestureTrainingSet class: Saved file is outdated, not loading")
                 return
 
             output = GestureTrainingSet()
 
             for sample_record in datastore['examples']:
                 output.add(Gesture.from_dict(sample_record))
+            
+            # for sample_record in datastore['unidentified']:
+            #     output.add(Gesture.from_dict(sample_record))
 
-            logging.info(output)
+            logging.debug('GestureTrainingSet class: Loaded {}'.format(output))
 
             return output
 
     def save(self, pathspec):
         datastore = {'version': GestureTrainingSet.current_version, 'examples': [x.to_dict() for x in self.examples]}
+        # Save unidentified samples here?
         with open(pathspec, 'w') as f:
             json.dump(datastore, f)
 
@@ -143,6 +152,6 @@ class GestureTrainingSet:
 
         for example in self.examples:
             data.append(example.bearings)
-            labels.append(ord(example.glyph) - ord('a'))
+            labels.append(ord(example.glyph) - ord('A'))
 
         return np.array(data), np.array(labels)
