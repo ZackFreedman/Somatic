@@ -18,7 +18,7 @@
 #include "tensorflow/lite/experimental/micro/testing/micro_test.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/version.h"
-#include "gesture_model.h"
+#include "model.h"
 
 // The following dumb bullshit just lets us turn off serial debug
 #define DEBUG
@@ -49,13 +49,17 @@ byte me;
 #include "imu.h"
 
 #define training_mode
-#define hid_mode
+//#define hid_mode
 
+//#define dont_actually_write
 // #define debug_angular_velocity
 //#define debug_gesture
 #define debug_dump_bt_rx
+#define debug_tensorflow
 
 #define bt Serial1
+#define btResponseMaxLength 20
+char btResponseBuffer[btResponseMaxLength];
 
 // Globals, needed by TFLite
 namespace {
@@ -77,24 +81,33 @@ unsigned long fingerDebounce = 100;
 const byte btRtsPin = 2;
 const byte vibePin = 23;
 const byte fingerSwitchPins[] = {9, 10, 11, 12};
+
+#define noHandSign 0
+#define mouseHandSign 1
+#define keebHandSign 10
+
 bool lastFingerPositions[4];
-unsigned long lastFingerStableTimestamps[4];
+byte handSign = noHandSign;
+unsigned long lastFingerStableTimestamps[4] = {0};
 
 float lastBearing[3];
 float yaw;
 float pitch;
 
-const float velocityThresholdToBegin = 4. / 1000000.;  // In rad/microsecond
+const float velocityThresholdToBegin = 5. / 1000000.;  // In rad/microsecond
 const float velocityThresholdToEnd = 2. / 1000000.;  // Also in rad/microsecond
-const int historyLength = 10;
+const float mouseVelocityThreshold = 0.01 / 1000000.; // I don't plan on changing the units at this point
+const int historyLength = 5;
 float angularVelocityWindow[historyLength];
+
+#define mouseScale 500.
 
 float bearingAtLastBuzz[2];
 const float distanceBetweenBuzzes = 15. / 180. * PI;
 elapsedMillis timeSinceBuzzStarted;
 unsigned long currentBuzzDuration;
 
-bool isGesturing;
+bool isDrawingGlyph;
 elapsedMillis timeSinceLastGesture;
 unsigned long lastTimestamp;
 
@@ -102,8 +115,6 @@ IMU imu = IMU();
 
 elapsedMillis timeSinceLastDebugCommandChar;
 #define commandLockout 10000
-
-char outgoingPacket[100];
 
 #define gestureConeAngle 2.0 / 3.0 * PI
 float gestureBearingZero[2];
@@ -122,7 +133,12 @@ elapsedMillis timeSinceFreeze;
 
 void setup() {
   Serial.begin(115200);
-  bt.begin(57600);
+  bt.begin(115200);
+
+  for (int i = 0; i < 3; i++) {
+    delay(200);
+    if (setUpBluetooth()) break;
+  }
 
   analogWriteFrequency(vibePin, 93750);  // Set to high frequency so switching noise is inaudible
 
@@ -151,7 +167,7 @@ void setup() {
 
   // Map the model into a usable data structure. This doesn't involve any
   // copying or parsing, it's a very lightweight operation.
-  model = tflite::GetModel(processed__2__tflite);
+  model = tflite::GetModel(modelBin);
   if (model->version() != TFLITE_SCHEMA_VERSION) {
     error_reporter->Report(
       "Model provided is schema version %d not equal "
@@ -265,56 +281,71 @@ void loop() {
     debug_println(angularVelocity * 1000000.);
 #endif
 
+    float angularVelocityAverage = angularVelocity;
+
     for (int i = historyLength - 2; i >= 0; i--) {
+      angularVelocityAverage += angularVelocityWindow[i];
       angularVelocityWindow[i + 1] = angularVelocityWindow[i];
     }
 
     angularVelocityWindow[0] = angularVelocity;
 
-    //   Packet format:
-    //   >[./|],[./|],[./|],[./|],[float h],[float p],[float r],[float accel x],[accel y],[accel z],[us since last sample]
+    angularVelocityAverage /= historyLength;
 
     for (int i = 0; i < 4; i++) {
       bool fingerPosition = digitalRead(fingerSwitchPins[i]);
       if (fingerPosition == lastFingerPositions[i]) {
         lastFingerStableTimestamps[i] = millis();
       }
-      else if (isGesturing || millis() - lastFingerStableTimestamps[i] >= fingerDebounce) {
+      else if (millis() - lastFingerStableTimestamps[i] >= fingerDebounce) {
         lastFingerPositions[i] = fingerPosition;
         lastFingerStableTimestamps[i] = millis();
       }
     }
 
-    bool handIsMoving = false;
+    // Keyboard stuff
+    bool handIsMovingFastEnoughToDraw = false;
 
     for (int i = 0; i < historyLength; i++) {
-      if ((isGesturing && angularVelocityWindow[i] >= velocityThresholdToEnd)
-          || (!isGesturing && angularVelocityWindow[i] >= velocityThresholdToBegin)) {
-        handIsMoving = true;
+      if ((isDrawingGlyph && angularVelocityAverage >= velocityThresholdToEnd)
+          || (!isDrawingGlyph && angularVelocityAverage >= velocityThresholdToBegin)) {
+        handIsMovingFastEnoughToDraw = true;
         break;
       }
     }
 
-    if (handIsMoving) {
-      if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
-        if (!isGesturing) {
+    if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
+      handSign = keebHandSign;
+    }
+    else if (lastFingerPositions[0] && lastFingerPositions[1] && !lastFingerPositions[2] && !lastFingerPositions[3]) {
+      handSign = mouseHandSign;
+    }
+    else
+      handSign = noHandSign;
+
+    if (handIsMovingFastEnoughToDraw) {
+      if (handSign == keebHandSign) {
+        if (!isDrawingGlyph) {
           buzzFor(250, 20);
           bearingAtLastBuzz[0] = yaw;
           bearingAtLastBuzz[1] = pitch;
           gestureBufferLength = 0;
           debug_println("Started gesturing");
         }
-        isGesturing = true;
+        isDrawingGlyph = true;
       }
     }
     else {
-      if (isGesturing)
+      if (isDrawingGlyph)
         debug_println("Stopped gesturing");
-      isGesturing = false;
+      isDrawingGlyph = false;
     }
 
     // Record and process gestures! This is the business end!
-    if (isGesturing) {
+    char winningGlyph = 0x00;
+    float topScore = 0.;
+
+    if (isDrawingGlyph) {
       if (gestureBufferLength <= maxGestureLength) {
         if (gestureBufferLength == 0) {
           gestureBearingZero[0] = yaw;
@@ -399,6 +430,10 @@ void loop() {
       }
 #endif
 
+#ifdef debug_tensorflow
+      unsigned long tfBenchmark = micros();
+#endif
+
       // Machine learning hijinks follows
       for (int i = 0; i < 100; i++) {
         input->data.f[i] = processedGesture[i / 2][i % 2];
@@ -410,13 +445,10 @@ void loop() {
         error_reporter->Report("Failed to invoke\n");
       }
       else {
-        char winningGlyph = ' ';
-        float topScore = 0.;
-
-        for (int i = 0; i <= 58; i++) {
+        for (int i = 0; i <= charCount; i++) {
           float score = output->data.f[i];
           if (score > topScore) {
-            winningGlyph = i + 'A';
+            winningGlyph = charMap[i];
             topScore = score;
           }
 
@@ -424,21 +456,42 @@ void loop() {
           debug_print("Output tensor ");
           debug_print(i);
           debug_print(" (");
-          debug_print(char(i + 'A'));
+
+          if (charMap[i] >= ' ')
+            debug_print(char(charMap[i]));
+          else {
+            debug_print("0x");
+            debug_print(charMap[i], HEX);
+          }
+          
           debug_print("): ");
           debug_println(score, 4);
 #endif
         }
 
-        for (int i = 0; i < 50; i++) debug_print(winningGlyph);
+#ifdef debug_tensorflow
+        debug_print("Inference took ");
+        debug_print(micros() - tfBenchmark);
+        debug_println("us");
+#endif
+
+        for (int i = 0; i < 50; i++) {
+          if (winningGlyph >= ' ')
+            debug_print(winningGlyph);
+          else {
+            debug_print("0x");
+            debug_print(winningGlyph, HEX);
+            debug_print(' ');
+          }
+        }
         debug_println();
       }
 
       gestureBufferLength = 0;
-    }
+    }  // gestureBufferLength > 0
 
     if (timeSinceBuzzStarted >= 80
-        && isGesturing
+        && isDrawingGlyph
         && norm(bearingAtLastBuzz[0], bearingAtLastBuzz[1], yaw, pitch) >= distanceBetweenBuzzes) {
       buzzFor(250, 20);
       bearingAtLastBuzz[0] = yaw;
@@ -447,8 +500,10 @@ void loop() {
 
     if (timeSinceLastDebugCommandChar >= commandLockout) {
       if (!digitalRead(btRtsPin)) {
-        for (int i = 0; i < 100; i++) outgoingPacket[i] = 0;
-
+#ifdef training_mode
+        //   Packet format:
+        //   >[./|],[./|],[./|],[./|],[float h],[float p],[float r],[float accel x],[accel y],[accel z],[us since last sample]
+        char outgoingPacket[100] = {0};
         outgoingPacket[0] = '>';
 
         if (lastFingerPositions[0]) outgoingPacket[1] = '.';
@@ -488,13 +543,37 @@ void loop() {
         itoa(sampleRate, &outgoingPacket[strlen(outgoingPacket)], 10);
         outgoingPacket[strlen(outgoingPacket)] = '\n';
 
-        for (int i = 0; i < strlen(outgoingPacket); i++) {
-          if (digitalRead(btRtsPin)) {
-            debug_println("Agh! RTS! Abandon ship!");
-            break;
+        bt.write(outgoingPacket, strlen(outgoingPacket));
+#endif  // ifdef training_mode
+
+#ifdef hid_mode
+byte packetLength = 0;
+
+        if (winningGlyph == 0x00) {
+          // Mouse stuff
+          if (handSign == mouseHandSign && angularVelocityAverage >= mouseVelocityThreshold) {
+            int xStop = wrappedDelta(lastBearing[0], yaw) * mouseScale;
+            int yStop = wrappedDelta(lastBearing[1], pitch) * mouseScale;
+            
+            if (xStop != 0 || yStop != 0) {
+              debug_print("Moving mouse ");
+              debug_print(xStop);
+              debug_print(" units right and ");
+              debug_print(yStop);
+              debug_println(" units up");
+
+              // Raw mouse report format. See RN42 HID User Guide, or really the BT spec itself
+              byte buf[] = {0xfd, 0x05, 0x02, 0x00, char(xStop), char(yStop), 0x00};
+              bt.write(buf, 7);
+            }
           }
-          else bt.print(outgoingPacket[i]);
         }
+        else {
+          bt.print(winningGlyph);
+          debug_print("Typing ");
+          debug_println(char(winningGlyph));
+        }
+#endif  // ifdef hid_mode
 
         if (isFrozen) {
           debug_println("Back to normal");
@@ -530,16 +609,175 @@ void quaternionMultiply(float* q1, float* q2, float* out) {
   out[3] = -q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] + q1[3] * q2[3];
 }
 
-//void configureBluetooth() {
-//  while (bt.available()) bt.read();
-//
-//  bt.print("$$$");
-//  delay(50);
-//
-//  while (bt.available()) {
-//    if (bt.read() == 'O')
-//  }
-//}
+bool setUpBluetooth() {
+  // Note that this will ALWAYS FAIL when the module is connected in PAIR mode and the CPU alone is reset.
+  // I did that for convenience, to use the module's built-in autoconnect.
+  // TODO: Connect programmatically
+
+  debug_println("Configuring BT. Emptying buffer...");
+  while (bt.available()) bt.read();  // %REBOOT\r message in particular may jam up the works
+
+  debug_println("Entering command mode...");
+  bt.print("$$$");
+  if (!btExpect("CMD", 200)) {
+    debug_println("Failed to enter command mode");
+    bt.setTimeout(20);
+    return false;
+  }
+
+  debug_println("Setting pairing mode");
+  bt.println("SM,6");
+  if (!btExpect("AOK", 200)) return false;
+
+  // TODO: Check if a setting is already correct, spare the EEPROM some pain
+
+#ifdef training_mode
+  debug_println("Switching to SPP mode");
+  bt.println("S~,0");
+  if (!btExpect("AOK", 200)) return false;
+#endif  // training_mode
+
+#ifdef hid_mode
+  debug_println("Switching to HID mode");
+  bt.println("S~,6");
+  if (!btExpect("AOK", 200)) return false;
+
+  debug_println("Configuring HID");
+  bt.println("SH,0230");  // 'Combo' descriptor, send output reports, 1 paired device
+  if (!btExpect("AOK", 200)) return false;
+#endif  // hid_mode
+
+  debug_println("Configuration complete, rebooting");
+  bt.println("R,1");
+  if (!btExpect("Reboot!", 200)) {
+    debug_println("Failed to run reboot command");
+    bt.setTimeout(20);
+    return false;
+  }
+  //  else {
+  //    btModuleResponse = bt.readStringUntil('\n');
+  //    if (btModuleResponse.indexOf("%REBOOT") == -1) {
+  //      debug_println("Failed to actually reboot");
+  //      bt.setTimeout(20);
+  //      return false;
+  //    }
+  //  }
+  debug_println("Rebooted");
+
+  //#ifdef hid_mode
+  //  // HID mode requires us to manually reconnect to host device.
+  //  // TODO: Do this regularly?
+  //  debug_println("Re-entering command mode...");
+  //  delay(1000);
+  //  bt.print("$$$");
+  //  bt.setTimeout(2000);
+  //  btModuleResponse = bt.readStringUntil('\n');
+  //  if (btModuleResponse.indexOf("CMD") == -1) {
+  //    debug_println("Failed to re-enter command mode");
+  //    bt.setTimeout(20);
+  //    return false;
+  //  }
+  //
+  //  debug_println("Connecting...");
+  //  bt.println('C');
+  //  btModuleResponse = bt.readStringUntil('\n');
+  //  if (btModuleResponse.indexOf("TRYING") == -1) {
+  //    debug_println("Failed to run connect command");
+  //    bt.setTimeout(20);
+  //    return false;
+  //  }
+  //  bt.setTimeout(10000);
+  //  btModuleResponse = bt.readStringUntil('\n');
+  //  debug_print("Connection result: ");
+  //  debug_println(btModuleResponse);
+  //
+  //  // TODO: Check if we're already connected
+  //  bt.println("---");
+  //  btModuleResponse = bt.readStringUntil('\n');
+  //  if (btModuleResponse.indexOf("END") == -1) {
+  //    debug_println("Failed to leave command mode");
+  //    bt.setTimeout(20);
+  //    return false;
+  //  }
+  //#endif  // ifdef hid_mode
+
+  debug_println("Setup complete");
+  bt.setTimeout(20);
+  return true;
+}
+
+bool readBtLine(char * buffer, int bufferLength, char terminator, int timeout) {
+  bool done = false;
+  unsigned long lastRxTime = millis();
+
+  debug_print("Reading line: ");
+
+  for (int i = 0; i < bufferLength; i++) {
+    if (done) buffer[i] = 0;
+    else {
+      while (!bt.available() && millis() - lastRxTime < timeout) {}
+      if (millis() - lastRxTime >= timeout) {
+        debug_println("Timed out");
+        return false;
+      }
+
+      int incoming = bt.read();
+
+      if (incoming == terminator) {
+        debug_println("<EOL>");
+        done = true;
+        buffer[i] = 0;
+      }
+      else {
+        debug_print(char(incoming));
+        buffer[i] = incoming;
+        lastRxTime = millis();
+      }
+    }
+  }
+
+  return done;
+}
+
+bool btExpect(char * target, int timeout) {
+  int targetLength = strlen(target);
+
+  debug_print("Expecting '");
+  debug_print(target);
+  debug_print("' of length ");
+  debug_println(targetLength);
+
+  if (!readBtLine(btResponseBuffer, btResponseMaxLength, '\n', timeout)) {
+    debug_println("Didn't receive a response line");
+    return false;
+  }
+
+  debug_print("Response was ");
+  debug_println(btResponseBuffer);
+
+  for (int i = 0; i < strlen(btResponseBuffer) - targetLength + 1; i++) {
+    for (int j = 0; j < targetLength; j++) {
+      if (btResponseBuffer[i + j] != target[j]) break;
+      if (j == targetLength - 1) return true;
+    }
+  }
+
+  return false;
+}
+
+/*
+  bool expectBtOk() {
+  btModuleResponse = bt.readStringUntil('\n');
+  debug_println(btModuleResponse);
+  if (btModuleResponse.indexOf("OK") == -1) {
+    debug_println("No response... command failed");
+    bt.setTimeout(20);
+    return false;
+  }
+  debug_println("Command succeeded");
+  return true;
+  }
+*/
 
 float wrappedDelta(float oldValue, float newValue) {
   float delta = oldValue - newValue;

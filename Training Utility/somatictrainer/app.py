@@ -41,7 +41,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.logger = logging.getLogger('HomeWindow')
         self.logger.setLevel(logging.INFO)
-        self._log_parsing = False
+        self._log_parsing = True
         self._log_angular_velocity = False
 
         self.gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
@@ -80,6 +80,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.open_file_has_been_modified = False
         self.change_count_since_last_save = 0
         self.autosave_change_threshold = 25
+        self._autosave_timer = None
         self.training_set = GestureTrainingSet()
 
         self.gesture_buffer = []
@@ -195,7 +196,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         # Debug code!
         self.model = keras.models.load_model(
-            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\simple_model.h5')
+            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2_bak.h5')
 
     def save_state(self):
         datastore = {'port': self.port.port if self.port is not None and self.port.isOpen() else None,
@@ -252,7 +253,16 @@ class SomaticTrainerHomeWindow(Frame):
         self.glyph_picker.delete(*self.glyph_picker.get_children())
 
         for glyph in GestureTrainingSet.big_ole_list_o_glyphs:
-            self.glyph_picker.insert('', 'end', text="Glyph '{}'".format(glyph),
+            if glyph is '\x08':
+                glyph_string = '<Backspace>'
+            elif glyph is '\n':
+                glyph_string = '<Return>'
+            elif glyph is ' ':
+                glyph_string = '<Space>'
+            else:
+                glyph_string = glyph
+
+            self.glyph_picker.insert('', 'end', text="Glyph '{}'".format(glyph_string),
                                      value=str(self.training_set.count(glyph)) if self.training_set else '0',
                                      iid=glyph)
 
@@ -337,8 +347,18 @@ class SomaticTrainerHomeWindow(Frame):
         if self.open_file_pathspec:
             self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
             if self.change_count_since_last_save >= self.autosave_change_threshold:
-                self.save_file()
-                self.change_count_since_last_save = 0
+                self.plan_autosave()
+
+    def plan_autosave(self):
+        if self._autosave_timer is not None:
+            self.after_cancel(self._autosave_timer)
+
+        def autosave():
+            self.save_file()
+            self.change_count_since_last_save = 0
+            self._autosave_timer = None
+
+        self._autosave_timer = self.after(30000, autosave)
 
     def start(self):
         self.master.after(10, self.queue_handler)
@@ -829,12 +849,16 @@ class SomaticTrainerHomeWindow(Frame):
                     results = sorted([[chr(ord('A') + i), j] for i, j in enumerate(results[0])],
                                      key=lambda item: item[1], reverse=True)
 
-                    for index, value in results[:2]:
-                        print('{}: {:.0f}'.format(index, value * 100))
+                    for index, value in results[:3]:
+                        print('{}: {:.0f}'.format(index, value))
 
                     if self.current_gesture_duration > 300000:
-                        self.path_display.create_text((125, 125), text=results[0][0],
-                                                      font=font.Font(family='Comic Sans', size=200))
+                        if results[0][1] > 0.95:
+                            self.path_display.create_text((125, 125), text=results[0][0],
+                                                          font=font.Font(family='Comic Sans', size=200))
+                        else:
+                            self.path_display.create_text((125, 125), text='?',
+                                                          font=font.Font(family='Comic Sans', size=200))
 
                     selected_glyph = self.glyph_picker.selection()[0]
                     short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
@@ -865,8 +889,7 @@ class SomaticTrainerHomeWindow(Frame):
                             if self.open_file_pathspec:
                                 self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
                                 if self.change_count_since_last_save >= self.autosave_change_threshold:
-                                    self.save_file()
-                                    self.change_count_since_last_save = 0
+                                    self.plan_autosave()
 
                             self.insert_thumbnail_button_for(new_gesture)
                             self.glyph_picker.item(new_gesture.glyph,

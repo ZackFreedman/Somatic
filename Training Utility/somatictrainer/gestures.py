@@ -74,7 +74,7 @@ class Gesture:
 class GestureTrainingSet:
     examples: List[Gesture]
 
-    big_ole_list_o_glyphs = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.,?!@#/ 1234567890'
+    big_ole_list_o_glyphs = '\x08\n !"#$\',-./0123456789?@ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
     short_glyphs = '., '
     current_version = 3  # For deleting old saves
 
@@ -146,12 +146,23 @@ class GestureTrainingSet:
         if index < self.count(glyph):
             self.examples.remove(self.get_examples_for(glyph)[index])
 
+    def get_character_map(self, type='decoding'):
+        chars = np.unique([x.glyph for x in self.examples])
+        if type is 'decoding':
+            return {i: chars[i] for i in range(len(chars))}
+        elif type is 'encoding':
+            return {chars[i]: i for i in range(len(chars))}
+        else:
+            raise AttributeError('Char map type must be "encoding" or "decoding"')
+
     def to_training_set(self):
+        char_map = self.get_character_map(type='encoding')
+
         data = []
         labels = []
 
         for example in self.examples:
             data.append(example.bearings)
-            labels.append(ord(example.glyph) - ord('A'))
+            labels.append(char_map[example.glyph])
 
         return np.array(data), np.array(labels)
