@@ -1,15 +1,20 @@
-import json
 import logging
+import os
+import time
 from typing import List
 import numpy as np
 import uuid
+import pickle
 
 standard_gesture_length = 50  # Length of (yaw, pitch) coordinates per gesture to be fed into ML algorithm
 
-logging.basicConfig(level=logging.INFO)
+_log_level = logging.DEBUG
 
 
 class Gesture:
+    logger = logging.getLogger(__name__)
+    logger.setLevel(_log_level)
+    
     def __init__(self, glyph, bearings, raw_data, gesture_uuid=None):
         """
 
@@ -27,9 +32,6 @@ class Gesture:
         if bearings.shape != (50, 2):
             raise AttributeError('Data invalid - got {} orientations instead of {}'
                                  .format(len(bearings), standard_gesture_length))
-
-        self.logger = logging.getLogger(__name__)
-
         self.bearings = bearings
         self.raw_data = raw_data
         self.glyph = glyph
@@ -66,7 +68,7 @@ class Gesture:
             return Gesture(glyph, bearings, raw_data, gesture_uuid)
 
         except (AssertionError, AttributeError, KeyError):
-            logging.exception('Gesture class: Error parsing dict {}...'.format(str(datastore)[:20]))
+            Gesture.logger.exception('Gesture class: Error parsing dict {}...'.format(str(datastore)[:20]))
 
         return None
 
@@ -78,40 +80,38 @@ class GestureTrainingSet:
     short_glyphs = '., '
     current_version = 3  # For deleting old saves
 
+    logger = logging.getLogger(__name__)
+    logger.setLevel(_log_level)
+
     def __init__(self):
         self.target_examples_per_glyph = 100
-
-        self.logger = logging.getLogger(__name__)
-
         self.examples = []
         # self.unidentified_examples = []
 
     @staticmethod
     def load(pathspec):
-        with open(pathspec, 'r') as f:
-            datastore = json.load(f)
-
-            if 'version' not in datastore or datastore['version'] != GestureTrainingSet.current_version:
-                logging.warning("GestureTrainingSet class: Saved file is outdated, not loading")
-                return
-
+        with open(pathspec, 'rb') as f:
             output = GestureTrainingSet()
 
-            for sample_record in datastore['examples']:
-                output.add(Gesture.from_dict(sample_record))
-            
-            # for sample_record in datastore['unidentified']:
-            #     output.add(Gesture.from_dict(sample_record))
+            output.examples = pickle.load(f)
 
-            logging.debug('GestureTrainingSet class: Loaded {}'.format(output))
+            GestureTrainingSet.logger.debug('GestureTrainingSet class: Loaded {}'.format(output))
 
             return output
 
     def save(self, pathspec):
-        datastore = {'version': GestureTrainingSet.current_version, 'examples': [x.to_dict() for x in self.examples]}
+        t = time.perf_counter()
+        GestureTrainingSet.logger.debug('Generating save dict took {}'.format(time.perf_counter() - t))
+
+        t = time.perf_counter()
         # Save unidentified samples here?
-        with open(pathspec, 'w') as f:
-            json.dump(datastore, f)
+        with open(pathspec + '.tmp', 'wb') as f:
+            pickle.dump(self.examples, f)
+
+        GestureTrainingSet.logger.debug('Saving took {}'.format(time.perf_counter() - t))
+
+        os.remove(pathspec)
+        os.rename(pathspec + '.tmp', pathspec)
 
     def add(self, example: Gesture):
         self.examples.append(example)

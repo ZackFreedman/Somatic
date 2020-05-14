@@ -3,7 +3,7 @@ import tkinter
 import logging
 import somatictrainer.app
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 def log_error(*args):
@@ -17,6 +17,7 @@ def _main():
     root = Tk()
     # root.attributes('-topmost', 1)
 
+    root.minsize(560, 550)
     window = somatictrainer.app.SomaticTrainerHomeWindow(root)
     window.start()
 

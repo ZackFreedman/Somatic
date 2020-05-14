@@ -1,3 +1,4 @@
+from random import randint
 from tkinter import *
 from tkinter import messagebox, filedialog, ttk, font
 
@@ -6,6 +7,7 @@ from serial import Serial, SerialException
 from serial.tools.list_ports import comports
 import threading
 import logging
+import requests
 import time
 from queue import Queue, Empty
 from collections import deque
@@ -34,6 +36,10 @@ class SomaticTrainerHomeWindow(Frame):
         connected = 2
         recording = 3
         processing = 4
+
+    class TrainingMode(Enum):
+        by_glyph = 0
+        with_lipsum = 1
 
     def __init__(self, master=None):
         Frame.__init__(self, master)
@@ -65,6 +71,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.example_thumbnails = {}
 
         self.state = self.State.disconnected
+        self.training_mode = self.TrainingMode.with_lipsum
 
         self.serial_sniffing_thread = None
         self.sample_handling_thread = None
@@ -94,6 +101,9 @@ class SomaticTrainerHomeWindow(Frame):
         self.starting_velocity_estimation_buffer = deque(maxlen=10)
         self.last_coordinate_visualized = None
 
+        self.lipsum_examples = []
+        self.thumbnail_buttons = []
+
         self.master.title('Somatic Trainer')
         self.pack(fill=BOTH, expand=1)
 
@@ -111,6 +121,21 @@ class SomaticTrainerHomeWindow(Frame):
         self.port_menu = Menu(self.menu_bar, tearoff=0, postcommand=self.populate_serial_port_menu)
         self.menu_bar.add_cascade(label='Serial Port', menu=self.port_menu)
 
+        self.training_mode_menu = Menu(self.menu_bar, tearoff=0)
+
+        self.training_mode_menu_selection = IntVar(value=self.training_mode)
+
+        def handle_training_mode_change():
+            self.change_training_mode_to(self.TrainingMode(self.training_mode_menu_selection.get()))
+
+        self.training_mode_menu.add_radiobutton(
+            label='Train by letter', variable=self.training_mode_menu_selection,
+            value=self.TrainingMode.by_glyph.value, command=handle_training_mode_change)
+        self.training_mode_menu.add_radiobutton(
+            label='Train with sentences', variable=self.training_mode_menu_selection,
+            value=self.TrainingMode.with_lipsum.value, command=handle_training_mode_change)
+        self.menu_bar.add_cascade(label='Training mode', menu=self.training_mode_menu)
+
         # This baloney is needed to get the selector menu checkboxes to play nice
         self._serial_port_active_var = BooleanVar()
         self._serial_port_active_var.set(True)
@@ -119,8 +144,8 @@ class SomaticTrainerHomeWindow(Frame):
 
         master.config(menu=self.menu_bar)
 
-        left_column = Frame(self, width=250)
-        right_column = Frame(self)
+        left_column = Frame(self, bg='blue')
+        right_column = Frame(self, bg='red')
 
         Label(left_column, text='Hand').pack(fill=X)
         self.hand_display = Canvas(left_column, width=250, height=250)
@@ -132,23 +157,14 @@ class SomaticTrainerHomeWindow(Frame):
         self.path_display.pack(fill=X)
 
         label_width_locking_frame = Frame(right_column, height=20, width=250)
-        label_width_locking_frame.pack_propagate(0)  # This prevents a long filename from stretching the window
-        label_width_locking_frame.pack(fill=X, anchor=N + E)
+        label_width_locking_frame.grid(row=0, column=0, sticky=N + E + W)
         self.file_name_label = Label(label_width_locking_frame, text='No training file open', bg='white', relief=SUNKEN)
         self.file_name_label.pack(fill=BOTH, expand=1)
 
-        self.glyph_picker = ttk.Treeview(right_column, column='count')
-        self.glyph_picker.column("#0", width=100, stretch=False)
-        self.glyph_picker.column('count', stretch=True)
-        self.glyph_picker.heading('count', text='Count')
-        self.glyph_picker.pack(fill=BOTH, expand=1, anchor=S + E)
-
-        self.reload_glyph_picker()
-        self.glyph_picker.bind('<<TreeviewSelect>>', lambda x: self.reload_example_list())
-
         picker_frame = Frame(right_column, bd=2, relief=SUNKEN)
-        picker_frame.grid_rowconfigure(0, weight=1)
-        picker_frame.grid_columnconfigure(0, weight=1)
+        picker_frame.grid_columnconfigure(0, minsize=284)
+
+        picker_frame.grid(row=2, column=0, sticky=S + E + W)
 
         self.thumbnail_canvas = Canvas(picker_frame, bd=0, width=250, height=150, bg='white')
         self.thumbnail_canvas.grid(row=0, column=0, sticky=N + S + E + W)
@@ -180,23 +196,50 @@ class SomaticTrainerHomeWindow(Frame):
         for i in range(5):
             self.thumbnail_frame.grid_columnconfigure(i, weight=1)
 
-        self.thumbnail_buttons = []
+        self.glyph_picker = ttk.Treeview(right_column, column='count')
+        self.glyph_picker.column("#0", width=100, stretch=False)
+        self.glyph_picker.column('count', stretch=True)
+        self.glyph_picker.heading('count', text='Count')
+        self.glyph_picker.grid(row=1, column=0, sticky=N + S + E + W)
+        if self.training_mode is not self.TrainingMode.by_glyph:
+            self.glyph_picker.grid_remove()
 
-        picker_frame.pack(fill=X, anchor=S + E)
+        self.glyph_picker.bind('<<TreeviewSelect>>', lambda x: self.reload_example_list())
+
+        self.lipsum_text = Text(right_column, font=font.Font(family='Comic Sans MS', size=18), wrap=WORD)
+        self.lipsum_text.tag_config('neutral', background='white', foreground='black')
+        self.lipsum_text.tag_config('correct', background='palegreen', foreground='darkgreen')
+        self.lipsum_text.tag_config('incorrect', background='lightcoral', foreground='darkred')
+        self.lipsum_text.tag_config('selected', background='black', foreground='white')
+
+        self.reset_lipsum()
+
+        self.lipsum_text.grid(row=1, column=0, sticky=N + S + E + W)
+        if self.training_mode is not self.TrainingMode.with_lipsum:
+            self.lipsum_text.grid_remove()
+
+        self.reload_glyph_picker()  # This must be here - self.lipsum_text must exist if we start in lipsum mode
 
         self.status_line = Label(self, text='Not connected', bd=1, relief=SUNKEN, anchor=W, bg='light goldenrod')
 
         left_column.grid(row=0, column=0, sticky=N)
         right_column.grid(row=0, column=1, sticky=N + S + E + W)
+        right_column.grid_propagate(False)
+        right_column.grid_columnconfigure(0, weight=1, minsize=250)
+        right_column.grid_rowconfigure(1, weight=1)
         self.status_line.grid(row=1, column=0, columnspan=2, sticky=S + E + W)
 
-        self.grid_columnconfigure(0, weight=0)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=0, minsize=250)
+        self.grid_columnconfigure(1, weight=1, minsize=250)
+        self.grid_rowconfigure(0, weight=1, minsize=500)
+
+        # self.grid_propagate(True)
 
         # Debug code!
         self.model = keras.models.load_model(
             'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2_bak.h5')
+
+        # self.model = None
 
     def save_state(self):
         datastore = {'port': self.port.port if self.port is not None and self.port.isOpen() else None,
@@ -246,6 +289,52 @@ class SomaticTrainerHomeWindow(Frame):
                 else:
                     self.logger.info("Couldn't reconnect to port {}".format(datastore['port']))
 
+    def reset_lipsum(self):
+        # Get rid of examples from the previous sentence
+        del self.lipsum_examples[:]
+        if self.training_mode is self.TrainingMode.with_lipsum:
+            self.reload_example_list()
+
+        # Get Hipster Ipsum, strip off trailing punctuation
+        call = requests.get('https://hipsum.co/api/?type=hipster-centric&sentences=1').json()[0]
+        tokens = call.split(' ')
+
+        for i in range(len(tokens)):
+            if randint(0, 2) == 0:
+                # Randomly capitalize some of the words to collect more caps samples
+                tokens[i] = tokens[i].capitalize()
+            elif randint(0, 5) == 0:
+                tokens[i] = tokens[i].upper()
+            if i < len(tokens) - 1:
+                tokens[i] += ' '
+
+        number = ''
+
+        for i in range(len(tokens)):
+            if randint(0, 4) == 0:
+                # Also add some numbers, we need more of those too
+                for j in range(2, 6):
+                    number += chr(ord('0') + randint(0, 9))
+                tokens.insert(i, number + ' ')
+                number = ''
+
+        symbols = '!"#$\',-./?@'  # No spaces - we got so many fukken spaces. The best spaces. The emptiest pixels.
+
+        for i in range(len(tokens)):
+            if randint(0, 4) == 0:
+                if i > 0:
+                    tokens[i - 1] = tokens[i - 1][:-1]  # Get rid of that space to make it clearer and easier to type
+                # Add some punctuation symbols too
+                tokens.insert(i, symbols[randint(0, len(symbols) - 1)] + ' ')
+
+        hipsum = ''.join(tokens)  # Put it all together
+
+        self.lipsum_text.config(state=NORMAL)  # This is required to edit the text
+        self.lipsum_text.delete('1.0', END)
+        self.lipsum_text.insert(END, hipsum)
+        self.lipsum_text.tag_add('selected', '1.0')
+        self.lipsum_text.config(state=DISABLED)  # This is required to prevent the user from editing the lipsum
+
     def reload_glyph_picker(self):
         scroll_position = self.glyph_picker.yview()[0]
         selected_item = self.get_selected_glyph()
@@ -272,8 +361,13 @@ class SomaticTrainerHomeWindow(Frame):
             self.glyph_picker.yview_moveto(scroll_position)
 
     def get_selected_glyph(self):
-        selected_item = self.glyph_picker.selection()[0] if len(self.glyph_picker.selection()) else None
-        return selected_item
+        if self.training_mode is self.TrainingMode.by_glyph:
+            return self.glyph_picker.selection()[0] if len(self.glyph_picker.selection()) else None
+        elif self.training_mode is self.TrainingMode.with_lipsum:
+            selection_range = self.lipsum_text.tag_nextrange('selected', '1.0')
+            return self.lipsum_text.get(selection_range[0], selection_range[1])
+        else:
+            return None
 
     def reload_example_list(self):
         for button in self.thumbnail_buttons:
@@ -282,12 +376,17 @@ class SomaticTrainerHomeWindow(Frame):
 
         del self.thumbnail_buttons[:]
 
-        selected_glyph = self.get_selected_glyph()
-        if selected_glyph is None or not self.training_set.count(selected_glyph):
-            return
+        if self.training_mode is self.TrainingMode.by_glyph:
+            selected_glyph = self.get_selected_glyph()
+            if selected_glyph is None or not self.training_set.count(selected_glyph):
+                return
 
-        for example in self.training_set.get_examples_for(selected_glyph):
-            self.insert_thumbnail_button_for(example)
+            for example in self.training_set.get_examples_for(selected_glyph):
+                self.insert_thumbnail_button_for(example)
+
+        elif self.training_mode is self.TrainingMode.with_lipsum:
+            for example in self.lipsum_examples:
+                self.insert_thumbnail_button_for(example)
 
         self.thumbnail_canvas.yview_moveto(0)
 
@@ -358,7 +457,8 @@ class SomaticTrainerHomeWindow(Frame):
             self.change_count_since_last_save = 0
             self._autosave_timer = None
 
-        self._autosave_timer = self.after(30000, autosave)
+        # self._autosave_timer = self.after(30000, autosave)
+        self._autosave_timer = self.after(10, autosave)
 
     def start(self):
         self.master.after(10, self.queue_handler)
@@ -477,9 +577,9 @@ class SomaticTrainerHomeWindow(Frame):
 
         new_file_pathspec = filedialog.asksaveasfilename(
             title='Create training file',
-            filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
+            filetypes=(('Database file', '*.db'), ('All files', '*')))
         if new_file_pathspec:
-            new_file_pathspec += '.json'
+            new_file_pathspec += '.db'
             self.open_file_pathspec = new_file_pathspec
             open(new_file_pathspec, 'w')  # Save empty file
 
@@ -495,7 +595,7 @@ class SomaticTrainerHomeWindow(Frame):
     def open_file(self, file_to_open=None):
         if file_to_open is None:
             file_to_open = filedialog.askopenfilename(title='Select training data',
-                                                      filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
+                                                      filetypes=(('Database file', '*.db'), ('All files', '*')))
 
         if not os.path.isfile(file_to_open):
             self.logger.warning("Can't open training file because it doesn't exist - {}".format(file_to_open))
@@ -531,7 +631,7 @@ class SomaticTrainerHomeWindow(Frame):
             file_to_create = filedialog.asksaveasfilename(title='Save training data',
                                                           filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
             if file_to_create:
-                self.open_file_pathspec = file_to_create + '.json'
+                self.open_file_pathspec = file_to_create + '.db'
             else:
                 return
 
@@ -552,7 +652,7 @@ class SomaticTrainerHomeWindow(Frame):
             return
 
         file_to_create = filedialog.asksaveasfilename(title='Save training data',
-                                                      filetypes=(('JSON dictionary', '*.json'), ('All files', '*')))
+                                                      filetypes=(('Database file', '*.db'), ('All files', '*')))
         if file_to_create:
             self.open_file_pathspec = file_to_create
         else:
@@ -581,7 +681,32 @@ class SomaticTrainerHomeWindow(Frame):
         else:
             self.port_menu.add_command(label='No serial ports available', state=DISABLED)
 
-    # def handle_connection_button(self):
+    def change_training_mode_to(self, new_mode):
+        self.training_mode_menu_selection.set(new_mode)
+
+        if new_mode is self.TrainingMode.by_glyph:
+            if self.training_mode is not self.TrainingMode.by_glyph:
+                logging.info('Changing to train-by-glyph mode')
+                self.training_mode = self.TrainingMode.by_glyph
+                self.lipsum_text.grid_remove()
+                self.glyph_picker.grid()
+                self.reload_example_list()
+            else:
+                logging.info('Already training by glyph')
+
+        elif new_mode is self.TrainingMode.with_lipsum:
+            if self.training_mode is not self.TrainingMode.with_lipsum:
+                logging.info('Changing to train-by-sentence mode')
+                self.training_mode = self.TrainingMode.with_lipsum
+                self.glyph_picker.grid_remove()
+                self.lipsum_text.grid()
+                self.reload_example_list()
+            else:
+                logging.info('Already training with lipsum')
+
+        else:
+            raise AttributeError('Unrecognized training mode {}'.format(new_mode))
+
     def connect_to(self, portspec):
         self.disconnect()
 
@@ -822,7 +947,7 @@ class SomaticTrainerHomeWindow(Frame):
                     processed_bearings = process_samples(np.array(self.gesture_buffer), standard_gesture_length)
 
                     for index, bearing in enumerate(processed_bearings):
-                        self.logger.info("Point {}: ({:.4f}, {:.2f})".format(index, bearing[0], bearing[1]))
+                        self.logger.debug("Point {}: ({:.4f}, {:.2f})".format(index, bearing[0], bearing[1]))
 
                     new_gesture = Gesture('', processed_bearings, deepcopy(self.raw_data_buffer))
 
@@ -839,66 +964,96 @@ class SomaticTrainerHomeWindow(Frame):
                     else:
                         flash_red()
                 elif new_gesture:
-                    # Debug Code!
                     daters = new_gesture.bearings
-                    print(daters)
 
                     # results = self.model.predict(daters.reshape(1, standard_gesture_length, 2))
                     results = self.model.predict(daters.reshape(1, standard_gesture_length * 2))
                     # self.logger.info(len(results[0]))
-                    results = sorted([[chr(ord('A') + i), j] for i, j in enumerate(results[0])],
-                                     key=lambda item: item[1], reverse=True)
+                    winning_glyph, confidence = \
+                    sorted([[self.training_set.get_character_map()[i], j] for i, j in enumerate(results[0])],
+                           key=lambda item: item[1], reverse=True)[0]
 
-                    for index, value in results[:3]:
-                        print('{}: {:.0f}'.format(index, value))
+                    selected_glyph = self.get_selected_glyph()
 
-                    if self.current_gesture_duration > 300000:
-                        if results[0][1] > 0.95:
-                            self.path_display.create_text((125, 125), text=results[0][0],
-                                                          font=font.Font(family='Comic Sans', size=200))
-                        else:
-                            self.path_display.create_text((125, 125), text='?',
-                                                          font=font.Font(family='Comic Sans', size=200))
+                    logging.info('Predicted \'{}\' with {:.2f}% confidence - {}!'.format(
+                        '0x' + hex(winning_glyph) if ord(winning_glyph) < ord(' ') else winning_glyph,
+                        confidence * 100, 'CORRECT' if winning_glyph == selected_glyph else 'WRONG'))
 
-                    selected_glyph = self.glyph_picker.selection()[0]
+                    if confidence > 0.95:
+                        self.path_display.create_text((125, 125),
+                                                      text='0x' + hex(winning_glyph)
+                                                      if ord(winning_glyph) < ord(' ')
+                                                      else winning_glyph,
+                                                      font=font.Font(family='Comic Sans MS', size=200))
+                    else:
+                        self.path_display.create_text((125, 125), text='?',
+                                                      font=font.Font(family='Comic Sans MS', size=200))
+                        logging.info('Too little confidence in this result to definitively call it')
+                        winning_glyph = None
+
                     short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
 
                     if self.current_gesture_duration > 0 and (short_glyph or self.current_gesture_duration > 300000):
-                        min_yaw = min(sample[0] for sample in self.gesture_buffer)
-                        max_yaw = max(sample[0] for sample in self.gesture_buffer)
-                        min_pitch = min(sample[1] for sample in self.gesture_buffer)
-                        max_pitch = max(sample[1] for sample in self.gesture_buffer)
-
-                        tiniest_glyph = 1 / 32 * np.pi
-
-                        if short_glyph or (max_yaw - min_yaw > tiniest_glyph or max_pitch - min_pitch > tiniest_glyph):
-                            new_gesture.glyph = selected_glyph
-                            self.training_set.add(new_gesture)
-
-                            overlay_text('Accepted sample #{} for glyph {}'.format(
-                                self.training_set.count(selected_glyph), selected_glyph))
-
-                            self.path_display.configure(bg='pale green')
-                            self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
-
-                            # We can save now! Yay!
-                            self.open_file_has_been_modified = True
-                            self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
-                            self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
-
-                            if self.open_file_pathspec:
-                                self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
-                                if self.change_count_since_last_save >= self.autosave_change_threshold:
-                                    self.plan_autosave()
-
-                            self.insert_thumbnail_button_for(new_gesture)
-                            self.glyph_picker.item(new_gesture.glyph,
-                                                   value=self.training_set.count(new_gesture.glyph))
-                            self.thumbnail_canvas.yview_moveto(1)
-
+                        if winning_glyph == selected_glyph:
+                            flash_blue()
                         else:
-                            overlay_text('Discarding - too small')
                             flash_red()
+
+                        # min_yaw = min(sample[0] for sample in self.gesture_buffer)
+                        # max_yaw = max(sample[0] for sample in self.gesture_buffer)
+                        # min_pitch = min(sample[1] for sample in self.gesture_buffer)
+                        # max_pitch = max(sample[1] for sample in self.gesture_buffer)
+                        #
+                        # tiniest_glyph = 1 / 32 * np.pi
+
+                        # if short_glyph or (max_yaw - min_yaw > tiniest_glyph or max_pitch - min_pitch > tiniest_glyph):
+                        new_gesture.glyph = selected_glyph
+                        self.training_set.add(new_gesture)
+
+                        overlay_text('Accepted sample #{} for glyph {}'.format(
+                            self.training_set.count(selected_glyph), selected_glyph))
+
+                        # TODO make this go red if it recognized wrong
+                        self.path_display.configure(bg='pale green')
+                        self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
+
+                        # We can save now! Yay!
+                        self.open_file_has_been_modified = True
+                        self.file_menu.entryconfigure(self.save_entry_index, state=NORMAL)
+                        self.file_menu.entryconfigure(self.save_as_entry_index, state=NORMAL)
+
+                        if self.open_file_pathspec:
+                            self.change_count_since_last_save += 1  # Autosave. Make Murphy proud.
+                            if self.change_count_since_last_save >= self.autosave_change_threshold:
+                                self.plan_autosave()
+
+                        self.insert_thumbnail_button_for(new_gesture)
+                        self.glyph_picker.item(new_gesture.glyph,
+                                               value=self.training_set.count(new_gesture.glyph))
+                        self.thumbnail_canvas.yview_moveto(1)
+
+                        if self.training_mode is self.TrainingMode.with_lipsum:
+                            selection_index = self.lipsum_text.tag_nextrange('selected', '1.0')[0]
+                            self.lipsum_text.tag_remove('selected', selection_index)
+
+                            if winning_glyph == selected_glyph:
+                                self.lipsum_text.tag_add('correct', selection_index)
+                            else:
+                                self.lipsum_text.tag_add('incorrect', selection_index)
+
+                            selection_index_position = int(selection_index.split('.')[-1])
+
+                            if selection_index_position >= len(self.lipsum_text.get('1.0', END)):
+                                # We've completed the sentence! Leave it onscreen a bit for maximum satisfaction.
+                                self.logger.info('Finished sentence! Well done.')
+                                self.after(2000, self.reset_lipsum)
+                            else:
+                                # Advance the thingy!
+                                self.lipsum_text.tag_add('selected', '1.{}'.format(selection_index_position + 1))
+
+                        # else:
+                        #     overlay_text('Discarding - too small')
+                        #     flash_red()
                     else:
                         overlay_text('Discarding - too short')
                         flash_red()

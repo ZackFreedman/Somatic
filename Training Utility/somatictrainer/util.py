@@ -2,7 +2,7 @@ import logging
 import numpy as np
 import quaternion
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 def lookRotation(forward, up):
@@ -125,7 +125,7 @@ def process_samples(samples: np.array, desired_length):
     if not len(samples) > 1:
         raise AttributeError('Sample list is empty')
 
-    logging.info('Normalizing:\n{0!r}'.format(samples))
+    logging.debug('Normalizing:\n{0!r}'.format(samples))
 
     # Strip redundant bearings
     unique_bearings = [samples[0]]
