@@ -1,3 +1,5 @@
+import pickle
+from datetime import datetime
 from random import randint
 from tkinter import *
 from tkinter import messagebox, filedialog, ttk, font
@@ -38,6 +40,7 @@ class SomaticTrainerHomeWindow(Frame):
         processing = 4
 
     class TrainingMode(Enum):
+        not_set = -1
         by_glyph = 0
         with_lipsum = 1
 
@@ -71,7 +74,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.example_thumbnails = {}
 
         self.state = self.State.disconnected
-        self.training_mode = self.TrainingMode.with_lipsum
+        self.training_mode = self.TrainingMode.not_set
 
         self.serial_sniffing_thread = None
         self.sample_handling_thread = None
@@ -93,11 +96,15 @@ class SomaticTrainerHomeWindow(Frame):
         self.gesture_buffer = []
         self.raw_data_buffer = []
         self.current_gesture_duration = 0
+        self.last_gesture_timestamp = datetime.now()
+        self.minimum_velocity_to_start_gesture = 5.0
+        self.maximum_velocity_to_end_gesture = 1.5
+        self.gesture_lockout_time = 0.2  # Seconds to ignore gestures, to allow user to reposition their hand
 
         self.samples_to_handle = []
         self.bearing_zero = None
         self.last_unprocessed_bearing_received = None
-        self.angular_velocity_window = deque(maxlen=10)
+        self.angular_velocity_window = deque(maxlen=5)
         self.starting_velocity_estimation_buffer = deque(maxlen=10)
         self.last_coordinate_visualized = None
 
@@ -123,7 +130,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.training_mode_menu = Menu(self.menu_bar, tearoff=0)
 
-        self.training_mode_menu_selection = IntVar(value=self.training_mode)
+        self.training_mode_menu_selection = IntVar(value=self.training_mode.value)
 
         def handle_training_mode_change():
             self.change_training_mode_to(self.TrainingMode(self.training_mode_menu_selection.get()))
@@ -201,8 +208,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.glyph_picker.column('count', stretch=True)
         self.glyph_picker.heading('count', text='Count')
         self.glyph_picker.grid(row=1, column=0, sticky=N + S + E + W)
-        if self.training_mode is not self.TrainingMode.by_glyph:
-            self.glyph_picker.grid_remove()
+        self.glyph_picker.grid_remove()
 
         self.glyph_picker.bind('<<TreeviewSelect>>', lambda x: self.reload_example_list())
 
@@ -215,8 +221,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.reset_lipsum()
 
         self.lipsum_text.grid(row=1, column=0, sticky=N + S + E + W)
-        if self.training_mode is not self.TrainingMode.with_lipsum:
-            self.lipsum_text.grid_remove()
+        self.lipsum_text.grid_remove()
 
         self.reload_glyph_picker()  # This must be here - self.lipsum_text must exist if we start in lipsum mode
 
@@ -236,8 +241,9 @@ class SomaticTrainerHomeWindow(Frame):
         # self.grid_propagate(True)
 
         # Debug code!
+        keras.backend.set_learning_phase(0)
         self.model = keras.models.load_model(
-            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2_bak.h5')
+            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2.h5')
 
         # self.model = None
 
@@ -245,7 +251,8 @@ class SomaticTrainerHomeWindow(Frame):
         datastore = {'port': self.port.port if self.port is not None and self.port.isOpen() else None,
                      'wip': self.open_file_pathspec,
                      'selected-glyph': self.get_selected_glyph(),
-                     'version': self._config_file_version}
+                     'version': self._config_file_version,
+                     'training-mode': self.training_mode.value}
 
         with open(os.getcwd() + 'config.json', 'w') as f:
             json.dump(datastore, f)
@@ -273,9 +280,11 @@ class SomaticTrainerHomeWindow(Frame):
                                 self.glyph_picker.focus(selected_item)
                                 self.glyph_picker.selection_set(selected_item)
                                 self.glyph_picker.see(selected_item)
-                            self.logger.info('Resuming with glyph {} selected'.format(datastore['selected-glyph']))
+                            self.logger.info('Resuming with glyph {} selected for train-by-glyph mode'.format(
+                                datastore['selected-glyph']))
                     except TclError:
-                        self.logger.warning("Couldn't select glyph {} - it doesn't exist?".format(datastore['selected-glyph']))
+                        self.logger.warning("Couldn't select glyph {} - it doesn't exist?".format(
+                            datastore['selected-glyph']))
                 else:
                     self.logger.warning("Couldn't reopen file - doesn't exist?")
 
@@ -288,6 +297,13 @@ class SomaticTrainerHomeWindow(Frame):
                     self.logger.info('Reconnected to glove on {}'.format(datastore['port']))
                 else:
                     self.logger.info("Couldn't reconnect to port {}".format(datastore['port']))
+
+            if 'training-mode' in datastore and datastore['training-mode'] is not None:
+                try:
+                    self.logger.info('Resuming into {} mode'.format(self.training_mode))
+                    self.change_training_mode_to(self.TrainingMode(datastore['training-mode']))
+                except ValueError:
+                    self.logger.info("Resumed training mode {} is invalid".format(datastore['training-mode']))
 
     def reset_lipsum(self):
         # Get rid of examples from the previous sentence
@@ -612,7 +628,7 @@ class SomaticTrainerHomeWindow(Frame):
                 self.file_menu.entryconfigure('Save as...', state=NORMAL)
                 self.file_name_label.configure(text=self.open_file_pathspec, anchor=E)
                 return True
-            except (KeyError, AttributeError, json.decoder.JSONDecodeError) as e:
+            except pickle.UnpicklingError as e:
                 self.logger.exception('Oopsie')
                 messagebox.showerror("Can't load file",
                                      "This file can't be loaded.\nError: {}".format(repr(e)))
@@ -682,7 +698,7 @@ class SomaticTrainerHomeWindow(Frame):
             self.port_menu.add_command(label='No serial ports available', state=DISABLED)
 
     def change_training_mode_to(self, new_mode):
-        self.training_mode_menu_selection.set(new_mode)
+        self.training_mode_menu_selection.set(new_mode.value)
 
         if new_mode is self.TrainingMode.by_glyph:
             if self.training_mode is not self.TrainingMode.by_glyph:
@@ -820,7 +836,7 @@ class SomaticTrainerHomeWindow(Frame):
                 self.accept_sample(fingers, bearing, acceleration, microseconds)
 
             else:
-                time.sleep(0.05)
+                time.sleep(0)
 
     def accept_sample(self, *args):
         self.samples_to_handle.append(args)
@@ -876,13 +892,37 @@ class SomaticTrainerHomeWindow(Frame):
 
             if self._log_angular_velocity:
                 self.logger.debug('Angular velocity {0:.2f} deg or {1:.2f} rad/s'.format(in_degrees, angular_velocity))
+        else:
+            angular_velocity = 0
 
         self.last_unprocessed_bearing_received = bearing
 
-        velocity_threshold = 2 if self.state is self.State.recording else 4
+        # velocity_threshold = 1.5 if self.state is self.State.recording else 5
 
-        gesture_eligible = (len([x for x in self.angular_velocity_window if x > velocity_threshold])
-                            and (fingers == self.pointer_gesture or self.state is self.State.recording))
+        gesture_eligible = True
+
+        if (datetime.now() - self.last_gesture_timestamp).total_seconds() <= self.gesture_lockout_time:
+            gesture_eligible = False
+            logging.debug('Locked out from gesturing')
+        else:
+            if self.state is not self.State.recording:
+                too_slow = angular_velocity < self.minimum_velocity_to_start_gesture
+                wrong_hand_sign = fingers != self.pointer_gesture
+
+                if too_slow:
+                    gesture_eligible = False
+                    if not wrong_hand_sign:
+                        logging.debug('Correct hand sign, but too slow')
+
+                if wrong_hand_sign:
+                    gesture_eligible = False
+                    if not too_slow:
+                        logging.debug('Correct speed, but wrong hand sign')
+            else:
+                if len(self.angular_velocity_window) is 0 \
+                        or np.average(self.angular_velocity_window) < self.maximum_velocity_to_end_gesture:
+                    gesture_eligible = False
+                    logging.debug('Stopping recording because hand slowed down')
 
         if self.bearing_zero is not None:
             # Constrain gesture to a cone
@@ -940,18 +980,26 @@ class SomaticTrainerHomeWindow(Frame):
                     self.path_display.configure(bg='SeaGreen1')
                     self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
 
+                def flash_green():
+                    self.path_display.configure(bg='palegreen')
+                    self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
+
                 def overlay_text(text):
                     self.path_display.create_text((5, 245), text=text, anchor=SW)
 
                 try:
+                    benchmark = time.perf_counter()
                     processed_bearings = process_samples(np.array(self.gesture_buffer), standard_gesture_length)
+                    logging.info('Processing took {:.2f} sec'.format(time.perf_counter() - benchmark))
 
                     for index, bearing in enumerate(processed_bearings):
                         self.logger.debug("Point {}: ({:.4f}, {:.2f})".format(index, bearing[0], bearing[1]))
 
                     new_gesture = Gesture('', processed_bearings, deepcopy(self.raw_data_buffer))
 
+                    benchmark = time.perf_counter()
                     self.visualize(processed_bearings)
+                    self.logger.info('Visualization took {:.2f} sec'.format(time.perf_counter() - benchmark))
                 except AttributeError:
                     self.logger.exception("Couldn't create gesture")
                     new_gesture = None
@@ -966,22 +1014,24 @@ class SomaticTrainerHomeWindow(Frame):
                 elif new_gesture:
                     daters = new_gesture.bearings
 
-                    # results = self.model.predict(daters.reshape(1, standard_gesture_length, 2))
+                    benchmark = time.perf_counter()
                     results = self.model.predict(daters.reshape(1, standard_gesture_length * 2))
+                    logging.info('Inference took {:.2f} sec'.format(time.perf_counter() - benchmark))
+
                     # self.logger.info(len(results[0]))
                     winning_glyph, confidence = \
-                    sorted([[self.training_set.get_character_map()[i], j] for i, j in enumerate(results[0])],
-                           key=lambda item: item[1], reverse=True)[0]
+                        sorted([[self.training_set.get_character_map()[i], j] for i, j in enumerate(results[0])],
+                               key=lambda item: item[1], reverse=True)[0]
 
                     selected_glyph = self.get_selected_glyph()
 
                     logging.info('Predicted \'{}\' with {:.2f}% confidence - {}!'.format(
-                        '0x' + hex(winning_glyph) if ord(winning_glyph) < ord(' ') else winning_glyph,
+                        hex(ord(winning_glyph)) if ord(winning_glyph) < ord(' ') else winning_glyph,
                         confidence * 100, 'CORRECT' if winning_glyph == selected_glyph else 'WRONG'))
 
-                    if confidence > 0.95:
+                    if confidence > 0.80:
                         self.path_display.create_text((125, 125),
-                                                      text='0x' + hex(winning_glyph)
+                                                      text='0x' + hex(ord(winning_glyph))
                                                       if ord(winning_glyph) < ord(' ')
                                                       else winning_glyph,
                                                       font=font.Font(family='Comic Sans MS', size=200))
@@ -995,7 +1045,7 @@ class SomaticTrainerHomeWindow(Frame):
 
                     if self.current_gesture_duration > 0 and (short_glyph or self.current_gesture_duration > 300000):
                         if winning_glyph == selected_glyph:
-                            flash_blue()
+                            flash_green()
                         else:
                             flash_red()
 
@@ -1013,9 +1063,9 @@ class SomaticTrainerHomeWindow(Frame):
                         overlay_text('Accepted sample #{} for glyph {}'.format(
                             self.training_set.count(selected_glyph), selected_glyph))
 
-                        # TODO make this go red if it recognized wrong
-                        self.path_display.configure(bg='pale green')
-                        self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
+                        # # TODO make this go red if it recognized wrong
+                        # self.path_display.configure(bg='pale green')
+                        # self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
 
                         # We can save now! Yay!
                         self.open_file_has_been_modified = True
@@ -1043,7 +1093,7 @@ class SomaticTrainerHomeWindow(Frame):
 
                             selection_index_position = int(selection_index.split('.')[-1])
 
-                            if selection_index_position >= len(self.lipsum_text.get('1.0', END)):
+                            if selection_index_position >= len(self.lipsum_text.get('1.0', END)) - 1:
                                 # We've completed the sentence! Leave it onscreen a bit for maximum satisfaction.
                                 self.logger.info('Finished sentence! Well done.')
                                 self.after(2000, self.reset_lipsum)
@@ -1054,6 +1104,8 @@ class SomaticTrainerHomeWindow(Frame):
                         # else:
                         #     overlay_text('Discarding - too small')
                         #     flash_red()
+
+                        self.last_gesture_timestamp = datetime.now()
                     else:
                         overlay_text('Discarding - too short')
                         flash_red()

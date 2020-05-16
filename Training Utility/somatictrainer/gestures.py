@@ -77,7 +77,7 @@ class GestureTrainingSet:
     examples: List[Gesture]
 
     big_ole_list_o_glyphs = '\x08\n !"#$\',-./0123456789?@ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-    short_glyphs = '., '
+    short_glyphs = '., \x08l-/'
     current_version = 3  # For deleting old saves
 
     logger = logging.getLogger(__name__)

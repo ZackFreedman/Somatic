@@ -1,4 +1,6 @@
 import logging
+import time
+
 import numpy as np
 import quaternion
 
@@ -122,10 +124,18 @@ def custom_euler_to_quat(yaw, pitch, roll):
 
 
 def process_samples(samples: np.array, desired_length):
+    logger = logging.getLogger('process_samples()')
+
+    benchmark = time.perf_counter()
+
+    def clock_that_step(description, benchmark):
+        logger.debug('{} took {:.0f} ms'.format(description.capitalize(), (time.perf_counter() - benchmark) * 1000))
+        return time.perf_counter()
+
     if not len(samples) > 1:
         raise AttributeError('Sample list is empty')
 
-    logging.debug('Normalizing:\n{0!r}'.format(samples))
+    logger.debug('Normalizing:\n{0!r}'.format(samples))
 
     # Strip redundant bearings
     unique_bearings = [samples[0]]
@@ -134,11 +144,13 @@ def process_samples(samples: np.array, desired_length):
             continue
 
         if np.isclose(bearing[0], samples[index - 1, 0]) and np.isclose(bearing[1], samples[index - 1, 1]):
-            logging.debug('Discarding redundant point ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
+            logger.debug('Discarding redundant point ({:.3f}, {:.3f})'.format(bearing[0], bearing[1]))
         else:
             unique_bearings.append(bearing)
 
     samples = np.array(unique_bearings)
+
+    benchmark = clock_that_step('Stripping dupes', benchmark)
 
     # Remap standardized bearings so gestures are the same size
     yaw_min = min(samples[:, 0])
@@ -150,7 +162,7 @@ def process_samples(samples: np.array, desired_length):
     magnitude = np.linalg.norm([yaw_max - yaw_min, pitch_max - pitch_min])
     fudge_factor = 1 / 10
 
-    logging.debug('Yaw min: {:.3f} Pitch min: {:.3f} Yaw max: {:.3f} Pitch max: {:.3f} Trim length: {:.3f}'.format(
+    logger.debug('Yaw min: {:.3f} Pitch min: {:.3f} Yaw max: {:.3f} Pitch max: {:.3f} Trim length: {:.3f}'.format(
         yaw_min, pitch_min, yaw_max, pitch_max, magnitude * fudge_factor))
 
     early_crap_count = 0
@@ -158,16 +170,16 @@ def process_samples(samples: np.array, desired_length):
     for i in range(1, len(samples)):
         if np.linalg.norm([samples[i, 0] - samples[0, 0],
                            samples[i, 1] - samples[0, 1]]) > magnitude * fudge_factor:
-            logging.debug('Done stripping leading points - ({:.3f}, {:.3f}) is far enough from start point '
-                          '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
+            logger.debug('Done stripping leading points - ({:.3f}, {:.3f}) is far enough from start point '
+                         '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
                 samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
                 magnitude * fudge_factor,
                 np.linalg.norm([samples[i, 0] - samples[0, 0],
                                 samples[i, 1] - samples[0, 1]])))
             break
         else:
-            logging.debug('Stripping leading point ({:.3f}, {:.3f}) - too close to start point ({:.3f}, {:.3f}). '
-                          'Must be {:.3f} units away, but is {:.3f}.'.format(
+            logger.debug('Stripping leading point ({:.3f}, {:.3f}) - too close to start point ({:.3f}, {:.3f}). '
+                         'Must be {:.3f} units away, but is {:.3f}.'.format(
                 samples[i, 0], samples[i, 1], samples[0, 0], samples[0, 1],
                 magnitude * fudge_factor,
                 np.linalg.norm([samples[i, 0] - samples[0, 0],
@@ -180,23 +192,25 @@ def process_samples(samples: np.array, desired_length):
 
     samples = np.array([start_point] + trimmed)
 
-    # logging.debug('Early crap stripped: {}'.format(samples))
+    benchmark = clock_that_step('Trimming early slop', benchmark)
+
+    # logger.debug('Early crap stripped: {}'.format(samples))
 
     late_crap_count = 0
 
     for i in range(2, len(samples)):
         if np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
                            samples[-i, 1] - samples[- 1, 1]]) > magnitude * fudge_factor:
-            logging.debug('Done stripping trailing points - ({:.3f}, {:.3f}) is far enough from endpoint '
-                          '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
+            logger.debug('Done stripping trailing points - ({:.3f}, {:.3f}) is far enough from endpoint '
+                         '({:.3f}, {:.3f}). Had to be {:.3f} units away, and is {:.3f}.'.format(
                 samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
                 magnitude * fudge_factor,
                 np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
                                 samples[-i, 1] - samples[- 1, 1]])))
             break
         else:
-            logging.debug('Stripping trailing point ({:.3f}, {:.3f}) - too close to endpoint ({:.3f}, {:.3f}). '
-                          'Must be {:.3f} units away, but is {:.3f}.'.format(
+            logger.debug('Stripping trailing point ({:.3f}, {:.3f}) - too close to endpoint ({:.3f}, {:.3f}). '
+                         'Must be {:.3f} units away, but is {:.3f}.'.format(
                 samples[-i, 0], samples[-i, 1], samples[-1, 0], samples[-1, 1],
                 magnitude * fudge_factor,
                 np.linalg.norm([samples[-i, 0] - samples[- 1, 0],
@@ -208,7 +222,9 @@ def process_samples(samples: np.array, desired_length):
         trimmed = samples[:(late_crap_count + 1) * -1].tolist()
         samples = np.array(trimmed + [endpoint])
 
-    logging.debug('Late crap stripped: {}'.format(samples))
+    logger.debug('Late crap stripped: {}'.format(samples))
+
+    benchmark = clock_that_step('Trimming late slop', benchmark)
 
     # Standardize bearings 'curve' to evenly-spaced points
 
@@ -220,15 +236,17 @@ def process_samples(samples: np.array, desired_length):
         segment_length = np.linalg.norm([sample[0] - samples[index - 1][0], sample[1] - samples[index - 1][1]])
 
         cumulative_segment_lengths.append(segment_length + cumulative_segment_lengths[index - 1])
-        logging.debug('Segment ending in point {} length {:.3f} Cumul: {:.3f}'.format(
+        logger.debug('Segment ending in point {} length {:.3f} Cumul: {:.3f}'.format(
             index, segment_length, cumulative_segment_lengths[index]))
 
     curve_length = cumulative_segment_lengths[-1]
     target_segment_length = curve_length / (desired_length - 1)
 
-    # logging.debug(
+    benchmark = clock_that_step('Calculating segment lengths', benchmark)
+
+    # logger.debug(
     #     'Segment lengths: {} - {} segments, {} points'.format(segment_lengths, len(segment_lengths), len(samples)))
-    logging.debug('Total length: {:.2f} Target segment length: {:.4f}'.format(curve_length, target_segment_length))
+    logger.debug('Total length: {:.2f} Target segment length: {:.4f}'.format(curve_length, target_segment_length))
 
     standardized_bearings = [samples[0]]
     first_longer_sample = 0
@@ -236,16 +254,16 @@ def process_samples(samples: np.array, desired_length):
     for i in range(1, desired_length):
         target_length = i * target_segment_length
 
-        logging.debug('Looking to place a point at {:.3f} units along curve'.format(target_length))
+        logger.debug('Looking to place a point at {:.3f} units along curve'.format(target_length))
 
         if cumulative_segment_lengths[first_longer_sample] > target_length:
-            logging.debug('Previous point at {:.3f} units along curve still works'.format(
+            logger.debug('Previous point at {:.3f} units along curve still works'.format(
                 cumulative_segment_lengths[first_longer_sample]))
 
         else:
             while cumulative_segment_lengths[first_longer_sample] < target_length \
                     and not np.isclose(cumulative_segment_lengths[first_longer_sample], target_length):
-                logging.debug(
+                logger.debug(
                     'Cumulative length of {:.3f} is too short - advancing to segment ending at point {}'.format(
                         cumulative_segment_lengths[first_longer_sample], first_longer_sample))
                 first_longer_sample += 1
@@ -264,16 +282,18 @@ def process_samples(samples: np.array, desired_length):
 
         standardized_point = [standardized_point_x, standardized_point_y]
 
-        logging.debug('Placed point {:.3f} units ({:.0f}%) along the {:.3f} line between {} and {} ==> {}'
-                      .format(target_length - cumulative_segment_lengths[first_longer_sample - 1],
-                              position_along_segment * 100,
-                              cumulative_segment_lengths[first_longer_sample]
-                              - cumulative_segment_lengths[first_longer_sample - 1],
-                              low_point, high_point, standardized_point))
+        logger.debug('Placed point {:.3f} units ({:.0f}%) along the {:.3f} line between {} and {} ==> {}'
+                     .format(target_length - cumulative_segment_lengths[first_longer_sample - 1],
+                             position_along_segment * 100,
+                             cumulative_segment_lengths[first_longer_sample]
+                             - cumulative_segment_lengths[first_longer_sample - 1],
+                             low_point, high_point, standardized_point))
 
         standardized_bearings.append(standardized_point)
 
-    logging.debug('Done interpolating. Scaling into 0-1 fractional dims')
+    logger.debug('Done interpolating. Scaling into 0-1 fractional dims')
+
+    benchmark = clock_that_step('Interpolation', benchmark)
 
     # Move lowest and leftest points to the edge
     standardized_bearings = [[y - yaw_min, p - pitch_min] for y, p in standardized_bearings]
@@ -285,6 +305,8 @@ def process_samples(samples: np.array, desired_length):
     standardized_bearings = np.array([[custom_interpolate(y, 0, max(total_width, total_height), 0, 1),
                                        custom_interpolate(p, 0, max(total_width, total_height), 0, 1)]
                                       for y, p in standardized_bearings])
+
+    clock_that_step('Resizing', benchmark)
 
     return standardized_bearings
 
