@@ -55,7 +55,7 @@ byte me;
 // #define debug_angular_velocity
 //#define debug_gesture
 #define debug_dump_bt_rx
-#define debug_tensorflow
+//#define debug_tensorflow
 
 #define bt Serial1
 #define btResponseMaxLength 20
@@ -95,7 +95,7 @@ float yaw;
 float pitch;
 
 const float velocityThresholdToBegin = 5. / 1000000.;  // In rad/microsecond
-const float velocityThresholdToEnd = 2. / 1000000.;  // Also in rad/microsecond
+const float velocityThresholdToEnd = 1.5 / 1000000.;  // Also in rad/microsecond
 const float mouseVelocityThreshold = 0.01 / 1000000.; // I don't plan on changing the units at this point
 const int historyLength = 5;
 float angularVelocityWindow[historyLength];
@@ -103,10 +103,12 @@ float angularVelocityWindow[historyLength];
 #define mouseScale 500.
 
 float bearingAtLastBuzz[2];
-const float distanceBetweenBuzzes = 15. / 180. * PI;
+const float distanceBetweenBuzzes = 12. / 180. * PI;
 elapsedMillis timeSinceBuzzStarted;
 unsigned long currentBuzzDuration;
 
+#define interGestureLockout 200  // Milliseconds to ignore velocity after gesturing, to get your hand into the next position
+//#define interGestureLockout 0
 bool isDrawingGlyph;
 elapsedMillis timeSinceLastGesture;
 unsigned long lastTimestamp;
@@ -306,12 +308,12 @@ void loop() {
     // Keyboard stuff
     bool handIsMovingFastEnoughToDraw = false;
 
-    for (int i = 0; i < historyLength; i++) {
-      if ((isDrawingGlyph && angularVelocityAverage >= velocityThresholdToEnd)
-          || (!isDrawingGlyph && angularVelocityAverage >= velocityThresholdToBegin)) {
-        handIsMovingFastEnoughToDraw = true;
-        break;
-      }
+    if (timeSinceLastGesture < interGestureLockout)
+      handIsMovingFastEnoughToDraw = false;
+    else if ((isDrawingGlyph && angularVelocityAverage >= velocityThresholdToEnd)
+             //        || (!isDrawingGlyph && angularVelocityAverage >= velocityThresholdToBegin)) {
+             || (!isDrawingGlyph && angularVelocity >= velocityThresholdToBegin)) {  // Don't use average - we want a snappier start
+      handIsMovingFastEnoughToDraw = true;
     }
 
     if (lastFingerPositions[0] && lastFingerPositions[1] && lastFingerPositions[2] && !lastFingerPositions[3]) {
@@ -326,11 +328,13 @@ void loop() {
     if (handIsMovingFastEnoughToDraw) {
       if (handSign == keebHandSign) {
         if (!isDrawingGlyph) {
-          buzzFor(250, 20);
+          buzzFor(250, 15);
           bearingAtLastBuzz[0] = yaw;
           bearingAtLastBuzz[1] = pitch;
           gestureBufferLength = 0;
-          debug_println("Started gesturing");
+          debug_print("Started gesturing after ");
+          debug_print(timeSinceLastGesture);
+          debug_println(" ms");
         }
         isDrawingGlyph = true;
       }
@@ -346,7 +350,7 @@ void loop() {
     float topScore = 0.;
 
     if (isDrawingGlyph) {
-      if (gestureBufferLength <= maxGestureLength) {
+      if (gestureBufferLength < maxGestureLength) {
         if (gestureBufferLength == 0) {
           gestureBearingZero[0] = yaw;
           gestureBearingZero[1] = pitch;
@@ -409,6 +413,9 @@ void loop() {
 #endif
     }
     else if (gestureBufferLength > 0) {
+      timeSinceLastGesture = 0;
+      buzzFor(250, 40);
+
 #ifdef debug_gesture
       debug_print("Gesture over - ");
       debug_print(gestureBufferLength);
@@ -463,7 +470,7 @@ void loop() {
             debug_print("0x");
             debug_print(charMap[i], HEX);
           }
-          
+
           debug_print("): ");
           debug_println(score, 4);
 #endif
@@ -493,7 +500,7 @@ void loop() {
     if (timeSinceBuzzStarted >= 80
         && isDrawingGlyph
         && norm(bearingAtLastBuzz[0], bearingAtLastBuzz[1], yaw, pitch) >= distanceBetweenBuzzes) {
-      buzzFor(250, 20);
+      buzzFor(250, 15);
       bearingAtLastBuzz[0] = yaw;
       bearingAtLastBuzz[1] = pitch;
     }
@@ -547,14 +554,14 @@ void loop() {
 #endif  // ifdef training_mode
 
 #ifdef hid_mode
-byte packetLength = 0;
+        byte packetLength = 0;
 
         if (winningGlyph == 0x00) {
           // Mouse stuff
           if (handSign == mouseHandSign && angularVelocityAverage >= mouseVelocityThreshold) {
             int xStop = wrappedDelta(lastBearing[0], yaw) * mouseScale;
             int yStop = wrappedDelta(lastBearing[1], pitch) * mouseScale;
-            
+
             if (xStop != 0 || yStop != 0) {
               debug_print("Moving mouse ");
               debug_print(xStop);

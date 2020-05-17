@@ -4,7 +4,7 @@ import time
 import numpy as np
 import quaternion
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 
 def lookRotation(forward, up):

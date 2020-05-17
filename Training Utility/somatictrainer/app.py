@@ -7,7 +7,6 @@ from tkinter import messagebox, filedialog, ttk, font
 import serial
 from serial import Serial, SerialException
 from serial.tools.list_ports import comports
-import threading
 import logging
 import requests
 import time
@@ -26,7 +25,6 @@ from somatictrainer.gestures import Gesture, GestureTrainingSet, standard_gestur
 class SomaticTrainerHomeWindow(Frame):
     model: keras.Model
     port: serial.Serial
-    serial_sniffing_thread: threading.Thread
     training_set: GestureTrainingSet
 
     pointer_gesture = [True, True, True, False]
@@ -49,7 +47,7 @@ class SomaticTrainerHomeWindow(Frame):
         self.master = master
 
         self.logger = logging.getLogger('HomeWindow')
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
         self._log_parsing = True
         self._log_angular_velocity = False
 
@@ -76,15 +74,14 @@ class SomaticTrainerHomeWindow(Frame):
         self.state = self.State.disconnected
         self.training_mode = self.TrainingMode.not_set
 
-        self.serial_sniffing_thread = None
-        self.sample_handling_thread = None
-
         self.queue = Queue()
         self.port = None
         self.receiving = False
         self.last_hand_id = -1
 
         self._config_file_version = 1
+
+        self.handling_samples = False
 
         self.open_file_pathspec = ''
         self.open_file_has_been_modified = False
@@ -244,6 +241,7 @@ class SomaticTrainerHomeWindow(Frame):
         keras.backend.set_learning_phase(0)
         self.model = keras.models.load_model(
             'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2.h5')
+        # '/Users/zackfreedman/Dropbox/Projects/Source-Controlled Projects/Somatic/Training Utility/training_set_2.h5')
 
         # self.model = None
 
@@ -466,20 +464,20 @@ class SomaticTrainerHomeWindow(Frame):
 
     def plan_autosave(self):
         if self._autosave_timer is not None:
-            self.after_cancel(self._autosave_timer)
+            self.master.after_cancel(self._autosave_timer)
 
         def autosave():
             self.save_file()
             self.change_count_since_last_save = 0
             self._autosave_timer = None
 
-        # self._autosave_timer = self.after(30000, autosave)
-        self._autosave_timer = self.after(10, autosave)
+        # self._autosave_timer = self.master.after(30000, autosave)
+        self._autosave_timer = self.master.after(10, autosave)
 
     def start(self):
         self.master.after(10, self.queue_handler)
         self.restore_state()
-        self.logger.debug('Gesture cone angle: {:.5f}'.format(self.gesture_cone_angle))# TODO cut this
+        self.logger.debug('Gesture cone angle: {:.5f}'.format(self.gesture_cone_angle))  # TODO cut this
 
     def stop(self):
         if self.open_file_has_been_modified:
@@ -498,7 +496,9 @@ class SomaticTrainerHomeWindow(Frame):
         self.queue.put({'type': 'quit'})
 
     def queue_handler(self):
-        try:
+        self.logger.debug('Queue has {} items'.format(self.queue.qsize()))
+
+        for i in range(self.queue.qsize()):
             command = self.queue.get(block=False)
 
             if command['type'] is 'ack':
@@ -506,7 +506,7 @@ class SomaticTrainerHomeWindow(Frame):
                     self.state = self.State.connected
                     self.logger.info('Got ack - connected')
 
-            if command['type'] is 'viz':
+            elif command['type'] is 'viz':
                 path = command['path']
 
                 self.path_display.delete(ALL)
@@ -537,7 +537,7 @@ class SomaticTrainerHomeWindow(Frame):
                     self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
                                                   fill='SeaGreen1')
 
-            if command['type'] is 'rx':
+            elif command['type'] is 'rx':
                 bearing = command['bearing']
                 if self.state is not self.State.disconnected and self.state is not self.State.quitting:
                     self.update_status(command['fingers'], bearing, command['freq'])
@@ -569,14 +569,60 @@ class SomaticTrainerHomeWindow(Frame):
                         self.logger.debug('Coordinate ({}, {}) invalid - leftover from before gesture?'
                                           .format(x_coord, y_coord))
 
-            if command['type'] is 'quit':
+            elif command['type'] is 'infer':
+                daters = command['data']
+                selected_glyph = command['selected']
+                duration = command['duration']
+                selection_index = command['selection-index']
+                benchmark = time.perf_counter()
+                results = self.model.predict(daters.reshape(1, standard_gesture_length * 2))
+                logging.info('Inference took {:.2f} sec'.format(time.perf_counter() - benchmark))
+
+                # self.logger.info(len(results[0]))
+                winning_glyph, confidence = \
+                    sorted([[self.training_set.get_character_map()[i], j] for i, j in enumerate(results[0])],
+                           key=lambda item: item[1], reverse=True)[0]
+
+                logging.info('Predicted \'{}\' with {:.2f}% confidence - {}!'.format(
+                    hex(ord(winning_glyph)) if ord(winning_glyph) < ord(' ') else winning_glyph,
+                    confidence * 100, 'CORRECT' if winning_glyph == selected_glyph else 'WRONG'))
+
+                if confidence > 0.80:
+                    self.master.after(1, lambda: self.path_display.create_text((125, 125),
+                                                                               text='0x' + hex(ord(winning_glyph))
+                                                                               if ord(winning_glyph) < ord(' ')
+                                                                               else winning_glyph,
+                                                                               font=font.Font(family='Comic Sans MS',
+                                                                                              size=200)))
+                else:
+                    self.master.after(1, lambda: self.path_display.create_text((125, 125), text='?',
+                                                                               font=font.Font(family='Comic Sans MS',
+                                                                                              size=200)))
+                    logging.info('Too little confidence in this result to definitively call it')
+                    winning_glyph = None
+
+                short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
+
+                if duration > 0 and (short_glyph or duration > 300000):
+                    if winning_glyph == selected_glyph:
+                        self.flash_green()
+                    else:
+                        self.flash_red()
+
+                if selection_index is not None:
+                    if winning_glyph == selected_glyph:
+                        self.lipsum_text.tag_add('correct', selection_index)
+                    else:
+                        self.lipsum_text.tag_add('incorrect', selection_index)
+
+            elif command['type'] is 'quit':
                 self.master.destroy()
                 return
 
-        except Empty:
-            pass
-
-        self.master.after(10, self.queue_handler)
+        if self.queue.qsize() > 0:
+            self.master.after(1, self.queue_handler)
+        else:
+            self.master.after(5, self.queue_handler)
 
     def new_file(self):
         if self.state is self.State.recording:
@@ -692,7 +738,8 @@ class SomaticTrainerHomeWindow(Frame):
                                                    variable=self._serial_port_active_var, onvalue=True, offvalue=False)
                 else:
                     self.port_menu.add_checkbutton(label=path, command=lambda pathspec=path: self.connect_to(pathspec),
-                                                   variable=self._serial_port_inactive_var, onvalue=True, offvalue=False)
+                                                   variable=self._serial_port_inactive_var, onvalue=True,
+                                                   offvalue=False)
 
         else:
             self.port_menu.add_command(label='No serial ports available', state=DISABLED)
@@ -740,7 +787,8 @@ class SomaticTrainerHomeWindow(Frame):
         except SerialException as e:
             self.logger.exception('dafuq')
             error_tokens = [x.strip("' ") for x in e.args[0].split('(')[1].split(',')]
-            messagebox.showinfo("Can't open {}".format(portspec), 'Error {}: {}'.format(error_tokens[0], error_tokens[1]))
+            messagebox.showinfo("Can't open {}".format(portspec),
+                                'Error {}: {}'.format(error_tokens[0], error_tokens[1]))
             self.state = self.State.disconnected
             self.status_line.configure(text="Can't connect to {}".format(portspec), bg='firebrick1')
             self.port = None
@@ -751,12 +799,12 @@ class SomaticTrainerHomeWindow(Frame):
 
             if self.receiving:
                 self.receiving = False
-                if threading.current_thread() is not self.serial_sniffing_thread \
-                        and self.serial_sniffing_thread \
-                        and self.serial_sniffing_thread.is_alive():
-                    self.logger.info('Quitting receive')
-                    self.serial_sniffing_thread.join(timeout=1)
-                    self.logger.info('No longer receiving')
+                # if threading.current_thread() is not self.serial_sniffing_thread \
+                #         and self.serial_sniffing_thread \
+                #         and self.serial_sniffing_thread.is_alive():
+                #     self.logger.info('Quitting receive')
+                #     self.serial_sniffing_thread.join(timeout=1)
+                #     self.logger.info('No longer receiving')
 
             if self.port.isOpen():
                 self.logger.info('Port closed')
@@ -778,79 +826,85 @@ class SomaticTrainerHomeWindow(Frame):
         self.receiving = True
         self.logger.info('Now receiving')
 
-        self.serial_sniffing_thread = threading.Thread(target=self.handle_packets, daemon=True)
-        self.serial_sniffing_thread.start()
+        self.master.after(1, self.handle_packets)
 
     def handle_packets(self):
-        while self.receiving and self.port and self.port.isOpen():
-            try:
-                incoming = self.port.readline().decode()
-            except SerialException:
-                self.logger.exception('Lost serial connection, bailing out')
-                self.disconnect()
+        if not self.receiving or not self.port or not self.port.isOpen():
+            return
+
+        try:
+            incoming = self.port.readline().decode()
+        except SerialException:
+            self.logger.exception('Lost serial connection, bailing out')
+            self.disconnect()
+            return
+
+        if incoming:
+            if self._log_parsing:
+                self.logger.debug('Received packet {}'.format(incoming))
+
+            # Packet format:
+            # >[./|],[./|],[./|],[./|],
+            # [float o.h],[float o.p],[float o.r],
+            # [float a.x], [float a.y], [float a.z], [us since last sample]
+
+            if incoming.count('>') is not 1:
+                if self._log_parsing:
+                    self.logger.debug('Packet corrupt - missing delimeter(s)')
+                self.master.after(1, self.handle_packets)
                 return
 
-            if incoming:
+            # Strip crap that arrived before the delimeter, and also the delimiter itself
+            incoming = incoming[incoming.index('>') + 1:].rstrip()
+
+            if incoming == 'OK':
+                self.logger.info('Received ack')
+                self.queue.put({'type': 'ack'}, block=False)
+                self.master.after(1, self.handle_packets)
+                return
+
+            if incoming.count(',') is not 10:
                 if self._log_parsing:
-                    self.logger.debug('Received packet {}'.format(incoming))
+                    self.logger.debug('Packet corrupt - insufficient fields')
+                self.master.after(1, self.handle_packets)
+                return
 
-                # Packet format:
-                # >[./|],[./|],[./|],[./|],
-                # [float o.h],[float o.p],[float o.r],
-                # [float a.x], [float a.y], [float a.z], [us since last sample]
+            tokens = incoming.split(',')
+            if self._log_parsing:
+                self.logger.debug('Tokens: {0}'.format(tokens))
 
-                if incoming.count('>') is not 1:
-                    if self._log_parsing:
-                        self.logger.debug('Packet corrupt - missing delimeter(s)')
-                    continue
+            fingers = list(map(lambda i: i is '.', tokens[:4]))
+            if self._log_parsing:
+                self.logger.debug('Fingers: {0}'.format(fingers))
 
-                # Strip crap that arrived before the delimeter, and also the delimiter itself
-                incoming = incoming[incoming.index('>') + 1:].rstrip()
+            bearing = np.array([float(t) for t in tokens[4:7]])
+            acceleration = np.array([float(t) for t in tokens[7:10]])
 
-                if incoming == 'OK':
-                    self.logger.info('Received ack')
-                    self.queue.put({'type': 'ack'})
-                    continue
+            microseconds = float(tokens[-1])
 
-                if incoming.count(',') is not 10:
-                    if self._log_parsing:
-                        self.logger.debug('Packet corrupt - insufficient fields')
-                    continue
+            if self._log_parsing:
+                self.logger.debug('Sample parsed')
 
-                tokens = incoming.split(',')
-                if self._log_parsing:
-                    self.logger.debug('Tokens: {0}'.format(tokens))
+            self.accept_sample(fingers, bearing, acceleration, microseconds)
 
-                fingers = list(map(lambda i: i is '.', tokens[:4]))
-                if self._log_parsing:
-                    self.logger.debug('Fingers: {0}'.format(fingers))
-
-                bearing = np.array([float(t) for t in tokens[4:7]])
-                acceleration = np.array([float(t) for t in tokens[7:10]])
-
-                microseconds = float(tokens[-1])
-
-                if self._log_parsing:
-                    self.logger.debug('Sample parsed')
-
-                self.accept_sample(fingers, bearing, acceleration, microseconds)
-
-            else:
-                time.sleep(0)
+        self.master.after(1, self.handle_packets)
+        return
 
     def accept_sample(self, *args):
         self.samples_to_handle.append(args)
 
-        if not self.sample_handling_thread or not self.sample_handling_thread.is_alive():
-            self.sample_handling_thread = threading.Thread(target=self.sample_handling_loop, daemon=True)
-            self.sample_handling_thread.start()
+        if not self.handling_samples:
+            self.handling_samples = True
+            self.master.after(1, self.sample_handling_loop)
 
     def sample_handling_loop(self):
-        while len(self.samples_to_handle):
+        if len(self.samples_to_handle):
             fingers, bearing, acceleration, microseconds = self.samples_to_handle[0]
             del self.samples_to_handle[0]
             self.handle_sample(fingers, bearing, acceleration, microseconds)
-            time.sleep(0)
+            self.master.after(1, self.sample_handling_loop)
+        else:
+            self.handling_samples = False
 
     def handle_sample(self, fingers, bearing, acceleration, microseconds):
         """
@@ -901,28 +955,29 @@ class SomaticTrainerHomeWindow(Frame):
 
         gesture_eligible = True
 
-        if (datetime.now() - self.last_gesture_timestamp).total_seconds() <= self.gesture_lockout_time:
+        if self.state is not self.State.recording:
+            too_slow = angular_velocity < self.minimum_velocity_to_start_gesture
+            wrong_hand_sign = fingers != self.pointer_gesture
+
+            if too_slow:
+                gesture_eligible = False
+                if not wrong_hand_sign:
+                    logging.debug('Correct hand sign, but too slow')
+
+            if wrong_hand_sign:
+                gesture_eligible = False
+                # if not too_slow:
+                # logging.debug('Correct speed, but wrong hand sign')
+        else:
+            if len(self.angular_velocity_window) is 0 \
+                    or np.average(self.angular_velocity_window) < self.maximum_velocity_to_end_gesture:
+                gesture_eligible = False
+                logging.debug('Stopping recording because hand slowed down')
+
+        if gesture_eligible and (
+                datetime.now() - self.last_gesture_timestamp).total_seconds() <= self.gesture_lockout_time:
             gesture_eligible = False
             logging.debug('Locked out from gesturing')
-        else:
-            if self.state is not self.State.recording:
-                too_slow = angular_velocity < self.minimum_velocity_to_start_gesture
-                wrong_hand_sign = fingers != self.pointer_gesture
-
-                if too_slow:
-                    gesture_eligible = False
-                    if not wrong_hand_sign:
-                        logging.debug('Correct hand sign, but too slow')
-
-                if wrong_hand_sign:
-                    gesture_eligible = False
-                    if not too_slow:
-                        logging.debug('Correct speed, but wrong hand sign')
-            else:
-                if len(self.angular_velocity_window) is 0 \
-                        or np.average(self.angular_velocity_window) < self.maximum_velocity_to_end_gesture:
-                    gesture_eligible = False
-                    logging.debug('Stopping recording because hand slowed down')
 
         if self.bearing_zero is not None:
             # Constrain gesture to a cone
@@ -970,22 +1025,8 @@ class SomaticTrainerHomeWindow(Frame):
         else:
             if self.state is self.State.recording:
                 self.logger.info('Sample done, {} points'.format(len(self.gesture_buffer)))
-                self.status_line.configure(bg='OliveDrab1')
 
-                def flash_red():
-                    self.path_display.configure(bg='salmon1')
-                    self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
-
-                def flash_blue():
-                    self.path_display.configure(bg='SeaGreen1')
-                    self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
-
-                def flash_green():
-                    self.path_display.configure(bg='palegreen')
-                    self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
-
-                def overlay_text(text):
-                    self.path_display.create_text((5, 245), text=text, anchor=SW)
+                # self.status_line.configure(bg='OliveDrab1')
 
                 try:
                     benchmark = time.perf_counter()
@@ -1005,50 +1046,30 @@ class SomaticTrainerHomeWindow(Frame):
                     new_gesture = None
 
                 if new_gesture and len(self.glyph_picker.selection()) is 0:
-                    overlay_text('Discarding - no glyph selected')
+                    self.overlay_text('Discarding - no glyph selected')
 
                     if self.current_gesture_duration > 300000:
-                        flash_blue()
+                        self.flash_blue()
                     else:
-                        flash_red()
+                        self.flash_red()
                 elif new_gesture:
                     daters = new_gesture.bearings
 
-                    benchmark = time.perf_counter()
-                    results = self.model.predict(daters.reshape(1, standard_gesture_length * 2))
-                    logging.info('Inference took {:.2f} sec'.format(time.perf_counter() - benchmark))
-
-                    # self.logger.info(len(results[0]))
-                    winning_glyph, confidence = \
-                        sorted([[self.training_set.get_character_map()[i], j] for i, j in enumerate(results[0])],
-                               key=lambda item: item[1], reverse=True)[0]
-
                     selected_glyph = self.get_selected_glyph()
+                    selection_index = self.lipsum_text.tag_nextrange('selected', '1.0')[0] \
+                        if self.training_mode is self.TrainingMode.with_lipsum \
+                        else None
 
-                    logging.info('Predicted \'{}\' with {:.2f}% confidence - {}!'.format(
-                        hex(ord(winning_glyph)) if ord(winning_glyph) < ord(' ') else winning_glyph,
-                        confidence * 100, 'CORRECT' if winning_glyph == selected_glyph else 'WRONG'))
-
-                    if confidence > 0.80:
-                        self.path_display.create_text((125, 125),
-                                                      text='0x' + hex(ord(winning_glyph))
-                                                      if ord(winning_glyph) < ord(' ')
-                                                      else winning_glyph,
-                                                      font=font.Font(family='Comic Sans MS', size=200))
-                    else:
-                        self.path_display.create_text((125, 125), text='?',
-                                                      font=font.Font(family='Comic Sans MS', size=200))
-                        logging.info('Too little confidence in this result to definitively call it')
-                        winning_glyph = None
+                    self.queue.put({'type': 'infer',
+                                    'data': daters,
+                                    'selected': selected_glyph,
+                                    'duration': self.current_gesture_duration,
+                                    'selection-index': selection_index},
+                                   block=False)
 
                     short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
 
                     if self.current_gesture_duration > 0 and (short_glyph or self.current_gesture_duration > 300000):
-                        if winning_glyph == selected_glyph:
-                            flash_green()
-                        else:
-                            flash_red()
-
                         # min_yaw = min(sample[0] for sample in self.gesture_buffer)
                         # max_yaw = max(sample[0] for sample in self.gesture_buffer)
                         # min_pitch = min(sample[1] for sample in self.gesture_buffer)
@@ -1060,12 +1081,8 @@ class SomaticTrainerHomeWindow(Frame):
                         new_gesture.glyph = selected_glyph
                         self.training_set.add(new_gesture)
 
-                        overlay_text('Accepted sample #{} for glyph {}'.format(
+                        self.overlay_text('Accepted sample #{} for glyph {}'.format(
                             self.training_set.count(selected_glyph), selected_glyph))
-
-                        # # TODO make this go red if it recognized wrong
-                        # self.path_display.configure(bg='pale green')
-                        # self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
 
                         # We can save now! Yay!
                         self.open_file_has_been_modified = True
@@ -1083,41 +1100,36 @@ class SomaticTrainerHomeWindow(Frame):
                         self.thumbnail_canvas.yview_moveto(1)
 
                         if self.training_mode is self.TrainingMode.with_lipsum:
-                            selection_index = self.lipsum_text.tag_nextrange('selected', '1.0')[0]
                             self.lipsum_text.tag_remove('selected', selection_index)
-
-                            if winning_glyph == selected_glyph:
-                                self.lipsum_text.tag_add('correct', selection_index)
-                            else:
-                                self.lipsum_text.tag_add('incorrect', selection_index)
 
                             selection_index_position = int(selection_index.split('.')[-1])
 
                             if selection_index_position >= len(self.lipsum_text.get('1.0', END)) - 1:
                                 # We've completed the sentence! Leave it onscreen a bit for maximum satisfaction.
                                 self.logger.info('Finished sentence! Well done.')
-                                self.after(2000, self.reset_lipsum)
+                                self.master.after(2000, self.reset_lipsum)
                             else:
                                 # Advance the thingy!
                                 self.lipsum_text.tag_add('selected', '1.{}'.format(selection_index_position + 1))
 
                         # else:
                         #     overlay_text('Discarding - too small')
-                        #     flash_red()
+                        #     self.flash_red()
 
                         self.last_gesture_timestamp = datetime.now()
                     else:
-                        overlay_text('Discarding - too short')
-                        flash_red()
+                        self.overlay_text('Discarding - too short')
+                        self.flash_red()
 
                 self.cancel_gesture()
                 self.state = self.State.connected
 
-        if self.queue.empty():
-            self.queue.put({'type': 'rx',
-                            'fingers': fingers,
-                            'bearing': bearing,
-                            'freq': frequency})
+        # if self.queue.empty():
+        self.queue.put({'type': 'rx',
+                        'fingers': fingers,
+                        'bearing': bearing,
+                        'freq': frequency},
+                       block=False)
 
     def update_status(self, fingers, bearing, frequency):
         def finger(value):
@@ -1140,7 +1152,23 @@ class SomaticTrainerHomeWindow(Frame):
         self.last_coordinate_visualized = None
 
     def visualize(self, path):
-        self.queue.put({'type': 'viz', 'path': path})
+        self.queue.put({'type': 'viz', 'path': path},
+                       block=False)
+
+    def flash_red(self):
+        self.master.after(1, lambda: self.path_display.configure(bg='salmon1'))
+        self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
+
+    def flash_blue(self):
+        self.master.after(1, lambda: self.path_display.configure(bg='SeaGreen1'))
+        self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
+
+    def flash_green(self):
+        self.master.after(1, lambda: self.path_display.configure(bg='palegreen'))
+        self.path_display.after(200, lambda: self.path_display.configure(bg='light grey'))
+
+    def overlay_text(self, text):
+        self.master.after(1, lambda: self.path_display.create_text((5, 245), text=text, anchor=SW))
 
 
 def _scale(x, in_min, in_max, out_min, out_max):

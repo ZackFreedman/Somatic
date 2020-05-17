@@ -110,7 +110,8 @@ class GestureTrainingSet:
 
         GestureTrainingSet.logger.debug('Saving took {}'.format(time.perf_counter() - t))
 
-        os.remove(pathspec)
+        if os.path.exists(pathspec):
+            os.remove(pathspec)
         os.rename(pathspec + '.tmp', pathspec)
 
     def add(self, example: Gesture):
