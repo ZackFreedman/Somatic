@@ -1,3 +1,4 @@
+import cProfile
 import pickle
 from datetime import datetime
 from random import randint
@@ -48,7 +49,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.logger = logging.getLogger('HomeWindow')
         self.logger.setLevel(logging.DEBUG)
-        self._log_parsing = True
+        self._log_parsing = False
         self._log_angular_velocity = False
 
         self.gesture_cone_angle = 2 / 3 * np.pi  # 120 degrees
@@ -76,6 +77,7 @@ class SomaticTrainerHomeWindow(Frame):
 
         self.queue = Queue()
         self.port = None
+        self._line_reader = None
         self.receiving = False
         self.last_hand_id = -1
 
@@ -239,11 +241,11 @@ class SomaticTrainerHomeWindow(Frame):
 
         # Debug code!
         keras.backend.set_learning_phase(0)
-        self.model = keras.models.load_model(
-            'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2.h5')
+        # self.model = keras.models.load_model(
+        # 'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2.h5')
         # '/Users/zackfreedman/Dropbox/Projects/Source-Controlled Projects/Somatic/Training Utility/training_set_2.h5')
 
-        # self.model = None
+        self.model = None
 
     def save_state(self):
         datastore = {'port': self.port.port if self.port is not None and self.port.isOpen() else None,
@@ -496,9 +498,15 @@ class SomaticTrainerHomeWindow(Frame):
         self.queue.put({'type': 'quit'})
 
     def queue_handler(self):
-        self.logger.debug('Queue has {} items'.format(self.queue.qsize()))
+        # cProfile.runctx('self.queue_handler_to_profile()', globals(), locals())
+        self.queue_handler_to_profile()
 
-        for i in range(self.queue.qsize()):
+    def queue_handler_to_profile(self):
+        queue_size = self.queue.qsize()
+        if queue_size:
+            self.logger.debug('Queue has {} items'.format(self.queue.qsize()))
+
+        for i in range(queue_size):
             command = self.queue.get(block=False)
 
             if command['type'] is 'ack':
@@ -537,6 +545,8 @@ class SomaticTrainerHomeWindow(Frame):
                     self.path_display.create_oval((x_coord - 2, y_coord - 2, x_coord + 2, y_coord + 2),
                                                   fill='SeaGreen1')
 
+                # self.master.update()
+
             elif command['type'] is 'rx':
                 bearing = command['bearing']
                 if self.state is not self.State.disconnected and self.state is not self.State.quitting:
@@ -568,6 +578,8 @@ class SomaticTrainerHomeWindow(Frame):
                     else:
                         self.logger.debug('Coordinate ({}, {}) invalid - leftover from before gesture?'
                                           .format(x_coord, y_coord))
+
+                # self.master.update()
 
             elif command['type'] is 'infer':
                 daters = command['data']
@@ -615,9 +627,15 @@ class SomaticTrainerHomeWindow(Frame):
                     else:
                         self.lipsum_text.tag_add('incorrect', selection_index)
 
+                # self.master.update()
+
             elif command['type'] is 'quit':
                 self.master.destroy()
                 return
+
+        if queue_size:
+            self.master.update()
+            self.logger.debug("Redrew")
 
         if self.queue.qsize() > 0:
             self.master.after(1, self.queue_handler)
@@ -774,7 +792,8 @@ class SomaticTrainerHomeWindow(Frame):
         self.disconnect()
 
         try:
-            self.port = Serial(port=portspec, baudrate=115200, timeout=0.2)
+            self.port = Serial(port=portspec, baudrate=115200)
+            self._line_reader = ReadLine(self.port)
 
             if not self.port.isOpen():
                 self.port.open()
@@ -832,60 +851,61 @@ class SomaticTrainerHomeWindow(Frame):
         if not self.receiving or not self.port or not self.port.isOpen():
             return
 
-        try:
-            incoming = self.port.readline().decode()
-        except SerialException:
-            self.logger.exception('Lost serial connection, bailing out')
-            self.disconnect()
-            return
+        while self.port.in_waiting:
+            try:
+                incoming = self._line_reader.readline().decode()
+            except SerialException:
+                self.logger.exception('Lost serial connection, bailing out')
+                self.disconnect()
+                return
 
-        if incoming:
-            if self._log_parsing:
-                self.logger.debug('Received packet {}'.format(incoming))
-
-            # Packet format:
-            # >[./|],[./|],[./|],[./|],
-            # [float o.h],[float o.p],[float o.r],
-            # [float a.x], [float a.y], [float a.z], [us since last sample]
-
-            if incoming.count('>') is not 1:
+            if incoming:
                 if self._log_parsing:
-                    self.logger.debug('Packet corrupt - missing delimeter(s)')
-                self.master.after(1, self.handle_packets)
-                return
+                    self.logger.debug('Received packet {}'.format(incoming))
 
-            # Strip crap that arrived before the delimeter, and also the delimiter itself
-            incoming = incoming[incoming.index('>') + 1:].rstrip()
+                # Packet format:
+                # >[./|],[./|],[./|],[./|],
+                # [float o.h],[float o.p],[float o.r],
+                # [float a.x], [float a.y], [float a.z], [us since last sample]
 
-            if incoming == 'OK':
-                self.logger.info('Received ack')
-                self.queue.put({'type': 'ack'}, block=False)
-                self.master.after(1, self.handle_packets)
-                return
+                if incoming.count('>') is not 1:
+                    if self._log_parsing:
+                        self.logger.debug('Packet corrupt - missing delimeter(s)')
+                    self.master.after(1, self.handle_packets)
+                    return
 
-            if incoming.count(',') is not 10:
+                # Strip crap that arrived before the delimeter, and also the delimiter itself
+                incoming = incoming[incoming.index('>') + 1:].rstrip()
+
+                if incoming == 'OK':
+                    self.logger.info('Received ack')
+                    self.queue.put({'type': 'ack'}, block=False)
+                    self.master.after(1, self.handle_packets)
+                    return
+
+                if incoming.count(',') is not 10:
+                    if self._log_parsing:
+                        self.logger.debug('Packet corrupt - insufficient fields')
+                    self.master.after(1, self.handle_packets)
+                    return
+
+                tokens = incoming.split(',')
                 if self._log_parsing:
-                    self.logger.debug('Packet corrupt - insufficient fields')
-                self.master.after(1, self.handle_packets)
-                return
+                    self.logger.debug('Tokens: {0}'.format(tokens))
 
-            tokens = incoming.split(',')
-            if self._log_parsing:
-                self.logger.debug('Tokens: {0}'.format(tokens))
+                fingers = list(map(lambda i: i is '.', tokens[:4]))
+                if self._log_parsing:
+                    self.logger.debug('Fingers: {0}'.format(fingers))
 
-            fingers = list(map(lambda i: i is '.', tokens[:4]))
-            if self._log_parsing:
-                self.logger.debug('Fingers: {0}'.format(fingers))
+                bearing = np.array([float(t) for t in tokens[4:7]])
+                acceleration = np.array([float(t) for t in tokens[7:10]])
 
-            bearing = np.array([float(t) for t in tokens[4:7]])
-            acceleration = np.array([float(t) for t in tokens[7:10]])
+                microseconds = float(tokens[-1])
 
-            microseconds = float(tokens[-1])
+                if self._log_parsing:
+                    self.logger.debug('Sample parsed')
 
-            if self._log_parsing:
-                self.logger.debug('Sample parsed')
-
-            self.accept_sample(fingers, bearing, acceleration, microseconds)
+                self.accept_sample(fingers, bearing, acceleration, microseconds)
 
         self.master.after(1, self.handle_packets)
         return
@@ -1045,7 +1065,10 @@ class SomaticTrainerHomeWindow(Frame):
                     self.logger.exception("Couldn't create gesture")
                     new_gesture = None
 
-                if new_gesture and len(self.glyph_picker.selection()) is 0:
+                if new_gesture \
+                        and (self.training_mode is self.TrainingMode.with_lipsum
+                             or (self.training_mode is self.TrainingMode.by_glyph
+                                 and len(self.glyph_picker.selection()))) is 0:
                     self.overlay_text('Discarding - no glyph selected')
 
                     if self.current_gesture_duration > 300000:
@@ -1060,12 +1083,13 @@ class SomaticTrainerHomeWindow(Frame):
                         if self.training_mode is self.TrainingMode.with_lipsum \
                         else None
 
-                    self.queue.put({'type': 'infer',
-                                    'data': daters,
-                                    'selected': selected_glyph,
-                                    'duration': self.current_gesture_duration,
-                                    'selection-index': selection_index},
-                                   block=False)
+                    if self.model:
+                        self.queue.put({'type': 'infer',
+                                        'data': daters,
+                                        'selected': selected_glyph,
+                                        'duration': self.current_gesture_duration,
+                                        'selection-index': selection_index},
+                                       block=False)
 
                     short_glyph = selected_glyph in GestureTrainingSet.short_glyphs
 

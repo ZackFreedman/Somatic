@@ -325,3 +325,33 @@ def wrapped_delta(old, new):
 def bearing_delta(old, new):
     return np.array([wrapped_delta(old[0], new[0]),
                      wrapped_delta(old[1], new[1])])
+
+
+# This is taken from https://github.com/pyserial/pyserial/issues/216#issuecomment-369414522
+class ReadLine:
+    def __init__(self, s):
+        self.buf = bytearray()
+        self.s = s  # Serial object
+
+    def readline(self):
+        timeout = self.s.timeout
+        self.s.timeout = 0.1
+
+        i = self.buf.find(b"\n")
+        if i >= 0:
+            r = self.buf[:i + 1]
+            self.buf = self.buf[i + 1:]
+            self.s.timeout = timeout
+            return r
+
+        while True:
+            i = max(1, min(2048, self.s.in_waiting))
+            data = self.s.read(i)
+            i = data.find(b"\n")
+            if i >= 0:
+                r = self.buf + data[:i + 1]
+                self.buf[0:] = data[i + 1:]
+                self.s.timeout = timeout
+                return r
+            else:
+                self.buf.extend(data)

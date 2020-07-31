@@ -5,6 +5,7 @@ from typing import List
 import numpy as np
 import uuid
 import pickle
+import bisect
 
 standard_gesture_length = 50  # Length of (yaw, pitch) coordinates per gesture to be fed into ML algorithm
 
@@ -76,7 +77,7 @@ class Gesture:
 class GestureTrainingSet:
     examples: List[Gesture]
 
-    big_ole_list_o_glyphs = '\x08\n !"#$\',-./0123456789?@ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    big_ole_list_o_glyphs = '\x08\n !"#$\'+,-./0123456789?@ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
     short_glyphs = '., \x08l-/'
     current_version = 3  # For deleting old saves
 
@@ -86,6 +87,7 @@ class GestureTrainingSet:
     def __init__(self):
         self.target_examples_per_glyph = 100
         self.examples = []
+        self.glyphs_represented = []
         # self.unidentified_examples = []
 
     @staticmethod
@@ -94,6 +96,7 @@ class GestureTrainingSet:
             output = GestureTrainingSet()
 
             output.examples = pickle.load(f)
+            output.glyphs_represented = np.unique([x.glyph for x in output.examples])
 
             GestureTrainingSet.logger.debug('GestureTrainingSet class: Loaded {}'.format(output))
 
@@ -116,6 +119,8 @@ class GestureTrainingSet:
 
     def add(self, example: Gesture):
         self.examples.append(example)
+        if example.glyph not in self.glyphs_represented:
+            bisect.insort(self.glyphs_represented, example.glyph)
 
     def get_examples_for(self, glyph):
         return [example for example in self.examples if example.glyph == glyph]
@@ -131,12 +136,16 @@ class GestureTrainingSet:
             example = example_or_uuid
             if example in self.examples:
                 self.examples.remove(example)
+                if not self.count(example.glyph):
+                    self.glyphs_represented.remove(example.glyph)
 
         elif type(example_or_uuid) is uuid.UUID:
             gesture_uuid = example_or_uuid
             for example in self.examples:
                 if gesture_uuid == example.uuid:
                     self.examples.remove(example)
+                    if not self.count(example.glyph):
+                        self.glyphs_represented.remove(example.glyph)
                     break
 
     def move(self, example, new_glyph):
@@ -144,15 +153,15 @@ class GestureTrainingSet:
             example.glyph = new_glyph
 
     def remove_at(self, glyph, index):
-        if index < self.count(glyph):
+        count = self.count(glyph)
+        if index < count:
             self.examples.remove(self.get_examples_for(glyph)[index])
 
     def get_character_map(self, type='decoding'):
-        chars = np.unique([x.glyph for x in self.examples])
         if type is 'decoding':
-            return {i: chars[i] for i in range(len(chars))}
+            return {i: self.glyphs_represented[i] for i in range(len(self.glyphs_represented))}
         elif type is 'encoding':
-            return {chars[i]: i for i in range(len(chars))}
+            return {self.glyphs_represented[i]: i for i in range(len(self.glyphs_represented))}
         else:
             raise AttributeError('Char map type must be "encoding" or "decoding"')
 
@@ -167,3 +176,4 @@ class GestureTrainingSet:
             labels.append(char_map[example.glyph])
 
         return np.array(data), np.array(labels)
+

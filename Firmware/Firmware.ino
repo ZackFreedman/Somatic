@@ -137,13 +137,21 @@ void setup() {
   Serial.begin(115200);
   bt.begin(115200);
 
+  delay(5000);
+  #ifdef training_mode
+  debug_println("Training mode");
+  #endif
+
+  #ifdef hid_mode
+  debug_println("HID mode");
+  #endif
   for (int i = 0; i < 3; i++) {
     delay(200);
     if (setUpBluetooth()) break;
   }
 
   analogWriteFrequency(vibePin, 93750);  // Set to high frequency so switching noise is inaudible
-
+ 
   pinMode(btRtsPin, INPUT);
 
   // Some butt-head didn't leave room for i2c pullups on the lil board.
