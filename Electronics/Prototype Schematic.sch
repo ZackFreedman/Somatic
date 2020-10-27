@@ -5137,6 +5137,7 @@ BACKPACK</text>
 <text x="-101.6" y="-15.24" size="1.778" layer="97">Place between
 pointer and thumb</text>
 <text x="-12.7" y="132.08" size="1.778" layer="97">Place on knuckles</text>
+<text x="-58.42" y="-53.34" size="1.778" layer="95">NVR4003NT3G</text>
 </plain>
 <instances>
 <instance part="MOD1" gate="G$1" x="-88.9" y="5.08"/>
