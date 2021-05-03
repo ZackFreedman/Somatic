@@ -16,7 +16,7 @@ The Somatic does not:
 * Let you type on a virtual keyboard
 * Use any cloud services at all
 
-The project is still in a pretty rough state. The roadmap includes:
+The project is still in a pretty rough state. If I revisit the project, the priorities are:
 * Lay out and fab circuit board
 * Make case smaller
 * Replace on/off Hall sensors with continuous sensors

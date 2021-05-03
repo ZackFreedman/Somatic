@@ -4,3 +4,8 @@ Training Utility/venv/**
 **(Not Repo)**
 *.pyc
 Training Utility/somatictrainerconfig.json
+**/pycharm-unfucking/**
+**/bak-.idea/**
+*.pb
+*.v2
+**/venv-osx/**

@@ -242,8 +242,8 @@ class SomaticTrainerHomeWindow(Frame):
         # Debug code!
         keras.backend.set_learning_phase(0)
         # self.model = keras.models.load_model(
-        # 'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\Training Utility\\training_set_2.h5')
-        # '/Users/zackfreedman/Dropbox/Projects/Source-Controlled Projects/Somatic/Training Utility/training_set_2.h5')
+        #     'E:\\Dropbox\\Projects\\Source-Controlled Projects\\Somatic\\Training Utility\\training_set_2.h5')
+        #     '/Users/zackfreedman/Dropbox/Projects/Source-Controlled Projects/Somatic/Training Utility/training_set_2.h5')
 
         self.model = None
 
@@ -326,13 +326,13 @@ class SomaticTrainerHomeWindow(Frame):
 
         number = ''
 
-        for i in range(len(tokens)):
-            if randint(0, 4) == 0:
-                # Also add some numbers, we need more of those too
-                for j in range(2, 6):
-                    number += chr(ord('0') + randint(0, 9))
-                tokens.insert(i, number + ' ')
-                number = ''
+        # for i in range(len(tokens)):
+        #     if randint(0, 4) == 0:
+        #         # Also add some numbers, we need more of those too
+        #         for j in range(2, 6):
+        #             number += chr(ord('0') + randint(0, 9))
+        #         tokens.inse≠≠≠rt(i, number + ' ')
+        #         number = ''
 
         symbols = '!"#$\',-./?@'  # No spaces - we got so many fukken spaces. The best spaces. The emptiest pixels.
 
@@ -591,9 +591,13 @@ class SomaticTrainerHomeWindow(Frame):
                 logging.info('Inference took {:.2f} sec'.format(time.perf_counter() - benchmark))
 
                 # self.logger.info(len(results[0]))
-                winning_glyph, confidence = \
-                    sorted([[self.training_set.get_character_map()[i], j] for i, j in enumerate(results[0])],
-                           key=lambda item: item[1], reverse=True)[0]
+                try:
+                    winning_glyph, confidence = \
+                        sorted([[self.training_set.get_character_map()[i], j] for i, j in enumerate(results[0])],
+                               key=lambda item: item[1], reverse=True)[0]
+                except KeyError:
+                    winning_glyph = ''
+                    confidence = 0
 
                 logging.info('Predicted \'{}\' with {:.2f}% confidence - {}!'.format(
                     hex(ord(winning_glyph)) if ord(winning_glyph) < ord(' ') else winning_glyph,
@@ -805,9 +809,13 @@ class SomaticTrainerHomeWindow(Frame):
 
         except SerialException as e:
             self.logger.exception('dafuq')
-            error_tokens = [x.strip("' ") for x in e.args[0].split('(')[1].split(',')]
-            messagebox.showinfo("Can't open {}".format(portspec),
-                                'Error {}: {}'.format(error_tokens[0], error_tokens[1]))
+            if len(e.args) and type(e.args[0]) is str:
+                error_tokens = [x.strip("' ") for x in e.args[0].split('(')[1].split(',')]
+                messagebox.showinfo("Can't open {}".format(portspec),
+                                    'Error {}: {}'.format(error_tokens[0], error_tokens[1]))
+            else:
+                messagebox.showinfo("Can't open {}".format(portspec),
+                                    'Error: {}'.format(e.args))
             self.state = self.State.disconnected
             self.status_line.configure(text="Can't connect to {}".format(portspec), bg='firebrick1')
             self.port = None
